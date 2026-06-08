@@ -43,26 +43,17 @@ func NewPostgreSQLEngine(db *sql.DB) Engine {
 	return &pgEngine{Engine: NewEngineWithDialect(db, PostgreSQLQueryDialect{})}
 }
 
-// NewEngine picks the appropriate engine for the given database. isPostgres
-// selects between PostgreSQLQueryDialect (true) and SQLiteQueryDialect (false).
-//
-// Prefer NewEngineForStore, which derives the dialect from the Store so callers
-// never thread a backend boolean. This lower-level form remains for tests and
-// internal use.
-//
-// The return type is the Engine interface so the SQLite-only TextEngine
-// is hidden when isPostgres is true.
-func NewEngine(db *sql.DB, isPostgres bool) Engine {
-	if isPostgres {
-		return NewPostgreSQLEngine(db)
-	}
-	return NewSQLiteEngine(db)
-}
-
 // NewEngineForStore builds the direct query engine for a Store, selecting the
 // SQL dialect from the store's backend. This is the single place engine
 // selection consults backend identity; callers ask the store for an engine
-// rather than re-deriving the dialect at each call site.
+// rather than re-deriving the dialect (or threading a backend boolean) at each
+// call site. The return type is the Engine interface so the SQLite-only
+// TextEngine is hidden on the PostgreSQL path.
 func NewEngineForStore(s *store.Store) Engine {
-	return NewEngine(s.DB(), s.IsPostgreSQL())
+	switch s.Backend() {
+	case store.BackendPostgreSQL:
+		return NewPostgreSQLEngine(s.DB())
+	default:
+		return NewSQLiteEngine(s.DB())
+	}
 }
