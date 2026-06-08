@@ -54,18 +54,18 @@ func runCreateSubset(cmd *cobra.Command, _ []string) error {
 	}
 
 	srcDBPath := cfg.DatabaseDSN()
-	// store.CopySubset uses ATTACH DATABASE + SQLite-only file-stat
-	// semantics; refuse early on a PG DSN to mirror the equivalent
-	// guard in backupDatabase (cmd/msgvault/cmd/deduplicate.go).
-	if store.IsPostgresURL(srcDBPath) {
-		return errors.New("create-subset is SQLite-only (uses ATTACH DATABASE); not supported with PostgreSQL stores")
-	}
-	if _, err := os.Stat(srcDBPath); os.IsNotExist(err) {
-		return fmt.Errorf(
-			"source database not found: %s\n"+
-				"Run 'msgvault init-db' and sync first",
-			srcDBPath,
-		)
+	// CopySubset enforces the SQLite-only requirement itself (it uses ATTACH
+	// DATABASE). For a local file, surface the friendlier "run init-db first"
+	// hint before reaching it; server backends fall through to CopySubset's
+	// capability error.
+	if store.BackendOfDSN(srcDBPath) == store.BackendSQLite {
+		if _, err := os.Stat(srcDBPath); os.IsNotExist(err) {
+			return fmt.Errorf(
+				"source database not found: %s\n"+
+					"Run 'msgvault init-db' and sync first",
+				srcDBPath,
+			)
+		}
 	}
 
 	dstDir, err := filepath.Abs(subsetOutput)

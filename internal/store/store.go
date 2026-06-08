@@ -65,26 +65,6 @@ func isSQLiteError(err error, substr string) bool {
 	return false
 }
 
-// IsPostgresURL returns true if the path looks like a PostgreSQL connection URL.
-// Exported so cmd-side helpers can decide whether to skip SQLite-only code
-// paths (e.g., the Parquet analytics cache) without first opening a Store.
-func IsPostgresURL(dbPath string) bool {
-	return strings.HasPrefix(dbPath, "postgresql://") || strings.HasPrefix(dbPath, "postgres://")
-}
-
-// IsMySQLURL returns true if the path looks like a MySQL / Dolt connection URL.
-// Dolt speaks the MySQL wire protocol, so both schemes route to the MySQL
-// backend. Exported alongside IsPostgresURL so cmd-side helpers can skip
-// file-only code paths (Parquet cache, backup VACUUM INTO) for server backends.
-func IsMySQLURL(dbPath string) bool {
-	return strings.HasPrefix(dbPath, "mysql://") || strings.HasPrefix(dbPath, "dolt://")
-}
-
-// IsServerURL reports whether the path is any non-file (client/server) DSN.
-func IsServerURL(dbPath string) bool {
-	return IsPostgresURL(dbPath) || IsMySQLURL(dbPath)
-}
-
 // mysqlDSNFromURL converts a mysql:// or dolt:// URL into the DSN form the
 // go-sql-driver/mysql driver expects (user:pass@tcp(host:port)/db?params).
 // parseTime is forced on so DATETIME columns scan into time.Time, and
@@ -133,13 +113,14 @@ const testSQLiteParams = "?_journal_mode=WAL&_busy_timeout=30000&_synchronous=OF
 // If dbPath is a postgres:// or postgresql:// URL, opens a PostgreSQL connection.
 // Otherwise, opens a SQLite database at the file path.
 func Open(dbPath string) (*Store, error) {
-	if IsPostgresURL(dbPath) {
+	switch BackendOfDSN(dbPath) {
+	case BackendPostgreSQL:
 		return openPostgres(dbPath)
-	}
-	if IsMySQLURL(dbPath) {
+	case BackendDolt:
 		return openDolt(dbPath)
+	default:
+		return openSQLite(dbPath, defaultSQLiteParams)
 	}
-	return openSQLite(dbPath, defaultSQLiteParams)
 }
 
 // OpenForTest opens or creates a database tuned for test use: ephemeral,
@@ -149,13 +130,14 @@ func Open(dbPath string) (*Store, error) {
 // Not for production use — a process crash mid-test can leave a corrupt
 // database, which is fine because tests recreate it from scratch.
 func OpenForTest(dbPath string) (*Store, error) {
-	if IsPostgresURL(dbPath) {
+	switch BackendOfDSN(dbPath) {
+	case BackendPostgreSQL:
 		return openPostgres(dbPath)
-	}
-	if IsMySQLURL(dbPath) {
+	case BackendDolt:
 		return openDolt(dbPath)
+	default:
+		return openSQLite(dbPath, testSQLiteParams)
 	}
-	return openSQLite(dbPath, testSQLiteParams)
 }
 
 // openSQLite opens a SQLite database at the given file path with the
@@ -285,10 +267,10 @@ func openDolt(dbURL string) (*Store, error) {
 // same database concurrently. Does not create the database, run migrations,
 // or checkpoint WAL on close.
 func OpenReadOnly(dbPath string) (*Store, error) {
-	if IsPostgresURL(dbPath) {
+	switch BackendOfDSN(dbPath) {
+	case BackendPostgreSQL:
 		return openPostgresReadOnly(dbPath)
-	}
-	if IsMySQLURL(dbPath) {
+	case BackendDolt:
 		// Dolt has no per-connection read-only enforcement: it accepts
 		// transaction_read_only but does not block writes on it, and
 		// @@read_only is global (would freeze the whole server, not this
@@ -450,21 +432,6 @@ func (s *Store) CheckpointWAL() error {
 func (s *Store) DB() *sql.DB {
 	return s.db.DB
 }
-
-// IsPostgreSQL reports whether this store is backed by PostgreSQL.
-// Engine factories use this to choose between the SQLite and PostgreSQL
-// query paths.
-func (s *Store) IsPostgreSQL() bool {
-	return s.dialect.DriverName() == "pgx"
-}
-
-// IsMySQL reports whether this store is backed by MySQL/Dolt.
-func (s *Store) IsMySQL() bool {
-	return s.dialect.DriverName() == "mysql"
-}
-
-// isMySQL is the unexported form used by intra-package backend gating.
-func (s *Store) isMySQL() bool { return s.dialect.DriverName() == "mysql" }
 
 // WithExclusiveLock executes fn while holding an exclusive write lock on the
 // database. In WAL mode this blocks concurrent writers (e.g. StartSync) while

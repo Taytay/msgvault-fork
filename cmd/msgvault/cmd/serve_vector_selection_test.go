@@ -54,7 +54,7 @@ func TestSetupVectorFeatures_Selection(t *testing.T) {
 		defer func() { _ = s.Close() }()
 		require.NoError(t, s.InitSchema())
 
-		vf, err := setupVectorFeatures(ctx, s.DB(), dbPath)
+		vf, err := setupVectorFeatures(ctx, s)
 		require.NoError(t, err)
 		require.NotNil(t, vf)
 		defer func() { _ = vf.Close() }()
@@ -67,14 +67,28 @@ func TestSetupVectorFeatures_Selection(t *testing.T) {
 
 	t.Run("backend=dolt on a file store errors", func(t *testing.T) {
 		cfg = vectorTestConfig(t, "dolt")
-		_, err := setupVectorFeatures(ctx, nil, filepath.Join(t.TempDir(), "main.db"))
+		s, err := store.OpenForTest(filepath.Join(t.TempDir(), "main.db"))
+		require.NoError(t, err)
+		defer func() { _ = s.Close() }()
+
+		_, err = setupVectorFeatures(ctx, s)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "requires a Dolt")
 	})
 
 	t.Run("backend=sqlite-vec on a Dolt store errors", func(t *testing.T) {
+		base := os.Getenv("MSGVAULT_TEST_DB")
+		if !strings.HasPrefix(base, "mysql://") && !strings.HasPrefix(base, "dolt://") {
+			t.Skip("set MSGVAULT_TEST_DB=mysql://... to run the Dolt selection case")
+		}
+		dbURL := createDoltTestDB(t, base)
+		s, err := store.Open(dbURL)
+		require.NoError(t, err)
+		defer func() { _ = s.Close() }()
+		require.NoError(t, s.InitSchema())
+
 		cfg = vectorTestConfig(t, "sqlite-vec")
-		_, err := setupVectorFeatures(ctx, nil, "mysql://root@127.0.0.1:3306/x")
+		_, err = setupVectorFeatures(ctx, s)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "cannot run against a Dolt store")
 	})
@@ -91,7 +105,7 @@ func TestSetupVectorFeatures_Selection(t *testing.T) {
 		require.NoError(t, s.InitSchema())
 
 		cfg = vectorTestConfig(t, "auto")
-		vf, err := setupVectorFeatures(ctx, s.DB(), dbURL)
+		vf, err := setupVectorFeatures(ctx, s)
 		require.NoError(t, err)
 		require.NotNil(t, vf)
 		defer func() { _ = vf.Close() }()

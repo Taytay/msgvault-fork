@@ -29,12 +29,14 @@ import (
 //     follow-up via Backend.Stats.)
 //   - SQLite file: sqlitevec (separate vectors.db, ATTACH-based FusedSearch).
 //
-// mainDB is the already-opened store handle; mainPath is its DSN/path.
-func setupVectorFeatures(ctx context.Context, mainDB *sql.DB, mainPath string) (*vectorFeatures, error) {
+// s is the already-opened store; the vector backend follows its system of
+// record.
+func setupVectorFeatures(ctx context.Context, s *store.Store) (*vectorFeatures, error) {
 	if !cfg.Vector.Enabled {
 		return nil, nil //nolint:nilnil // vector disabled: callers nil-check vf; (nil, nil) means "no features, no error"
 	}
-	if store.IsPostgresURL(mainPath) {
+	mainDB := s.DB()
+	if s.Backend() == store.BackendPostgreSQL {
 		return nil, fmt.Errorf(
 			"vector features are SQLite-only; set [vector] enabled = false to use msgvault with PostgreSQL (vector support is planned for PR4)")
 	}
@@ -61,7 +63,7 @@ func setupVectorFeatures(ctx context.Context, mainDB *sql.DB, mainPath string) (
 	// Resolve the effective backend. "auto" follows the system of record.
 	kind := cfg.Vector.Backend
 	if kind == "" || kind == "auto" {
-		if store.IsMySQLURL(mainPath) {
+		if s.Backend() == store.BackendDolt {
 			kind = "dolt"
 		} else {
 			kind = "sqlite-vec"
@@ -70,8 +72,8 @@ func setupVectorFeatures(ctx context.Context, mainDB *sql.DB, mainPath string) (
 
 	// Dolt backend: search served directly from the system of record.
 	if kind == "dolt" {
-		if !store.IsMySQLURL(mainPath) {
-			return nil, fmt.Errorf("vector.backend=\"dolt\" requires a Dolt (mysql://) store; got %q", mainPath)
+		if s.Backend() != store.BackendDolt {
+			return nil, fmt.Errorf("vector.backend=\"dolt\" requires a Dolt (mysql://) store; got the %s backend", s.Backend())
 		}
 		backend, err := doltvec.Open(ctx, doltvec.Options{
 			DB:        mainDB,
@@ -95,9 +97,13 @@ func setupVectorFeatures(ctx context.Context, mainDB *sql.DB, mainPath string) (
 	}
 
 	// SQLite backend: separate vectors.db with the sqlite-vec extension.
-	if store.IsMySQLURL(mainPath) {
+	if s.Backend() == store.BackendDolt {
 		return nil, fmt.Errorf(
 			"vector.backend=\"sqlite-vec\" cannot run against a Dolt store; set [vector].backend = \"dolt\" or \"auto\"")
+	}
+	cache, ok := s.AnalyticsCache()
+	if !ok {
+		return nil, fmt.Errorf("vector.backend=\"sqlite-vec\" requires a local SQLite store")
 	}
 	if err := sqlitevec.RegisterExtension(); err != nil {
 		return nil, fmt.Errorf("register sqlite-vec: %w", err)
@@ -109,7 +115,7 @@ func setupVectorFeatures(ctx context.Context, mainDB *sql.DB, mainPath string) (
 	}
 	backend, err := sqlitevec.Open(ctx, sqlitevec.Options{
 		Path:      vecPath,
-		MainPath:  mainPath,
+		MainPath:  cache.SourcePath(),
 		Dimension: cfg.Vector.Embeddings.Dimension,
 		MainDB:    mainDB,
 	})

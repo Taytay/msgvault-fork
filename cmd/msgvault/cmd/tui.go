@@ -105,21 +105,17 @@ Remote Mode:
 
 			analyticsDir := cfg.AnalyticsDir()
 
-			// The Parquet analytics cache is a SQLite → DuckDB ETL and
-			// has no meaning when the system of record is PostgreSQL —
-			// buildCache feeds the DSN to the SQLite driver and
-			// cacheNeedsBuild dispatches ? placeholders that pgx
-			// rejects. On PG, skip the entire cache pipeline and go
-			// straight to the dialect-aware query engine.
-			// Build/refresh the Parquet cache if stale (SQLite-only ETL; the
-			// factory below skips the cache entirely on PostgreSQL). Engine
-			// *selection* is delegated to query.OpenReadEngine, shared with
-			// the serve and mcp commands.
-			if !s.IsPostgreSQL() && !forceSQL && !skipCacheBuild {
-				staleness := cacheNeedsBuild(dbPath, analyticsDir)
+			// Build/refresh the Parquet cache if stale. The cache is a
+			// SQLite → DuckDB ETL, so only backends that expose the
+			// analytics-cache capability (local SQLite, including the Dolt
+			// read-replica) have one to build; client/server backends skip
+			// straight to the dialect-aware engine. Engine *selection* is
+			// delegated to query.OpenReadEngine, shared with serve and mcp.
+			if cache, ok := s.AnalyticsCache(); ok && !forceSQL && !skipCacheBuild {
+				staleness := cacheNeedsBuild(s, analyticsDir)
 				if staleness.NeedsBuild {
 					fmt.Printf("Building analytics cache (%s)...\n", staleness.Reason)
-					result, err := buildCache(dbPath, analyticsDir, staleness.FullRebuild)
+					result, err := buildCache(cache.SourcePath(), analyticsDir, staleness.FullRebuild)
 					if err != nil {
 						fmt.Fprintf(os.Stderr, "Warning: Failed to build cache: %v\n", err)
 					} else if !result.Skipped {
@@ -128,9 +124,8 @@ Remote Mode:
 				}
 			}
 
-			engine = query.OpenReadEngine(s.DB(), dbPath, query.ReadEngineOptions{
+			engine = query.OpenReadEngine(s, query.ReadEngineOptions{
 				AnalyticsDir:         analyticsDir,
-				IsPostgres:           s.IsPostgreSQL(),
 				ForceSQL:             forceSQL,
 				DisableSQLiteScanner: noSQLiteScanner,
 			})
@@ -186,12 +181,12 @@ type cacheStaleness struct {
 // updated. Collects all staleness signals before returning so that
 // e.g. a mixed add+delete sync correctly reports both.
 //
-// The Parquet cache is a SQLite-only ETL — when dbPath points at a
-// PostgreSQL DSN, this returns "no build needed" rather than dispatching
-// SQLite-shaped queries against pgx (which would fail on the ?
-// placeholders and the sqlite_master probe).
-func cacheNeedsBuild(dbPath, analyticsDir string) cacheStaleness {
-	if store.IsPostgresURL(dbPath) {
+// The analytics cache is a SQLite-only ETL: backends without the
+// analytics-cache capability (PostgreSQL, raw Dolt) report "no build needed"
+// rather than dispatching SQLite-shaped queries the backend would reject. The
+// store handle is reused for the freshness queries.
+func cacheNeedsBuild(s *store.Store, analyticsDir string) cacheStaleness {
+	if _, ok := s.AnalyticsCache(); !ok {
 		return cacheStaleness{}
 	}
 	messagesDir := filepath.Join(analyticsDir, tableMessages)
@@ -222,14 +217,7 @@ func cacheNeedsBuild(dbPath, analyticsDir string) cacheStaleness {
 		}
 	}
 
-	db, err := store.Open(dbPath)
-	if err != nil {
-		return cacheStaleness{
-			NeedsBuild: true, FullRebuild: true,
-			Reason: "cannot verify cache status",
-		}
-	}
-	defer func() { _ = db.Close() }()
+	db := s
 
 	var maxID int64
 	err = db.DB().QueryRow(`

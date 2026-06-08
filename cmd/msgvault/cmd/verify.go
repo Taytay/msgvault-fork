@@ -69,12 +69,9 @@ Examples:
 		// out-of-band tool.
 		var dbCorrupt bool
 		if !verifySkipDBCheck {
-			if s.IsPostgreSQL() {
-				fmt.Println("Skipping database integrity check (PostgreSQL — use pg_amcheck out-of-band).")
-				fmt.Println()
-			} else {
+			if checker, ok := s.IntegrityChecker(); ok {
 				fmt.Println("Running database integrity check...")
-				integrityErrors, err := runIntegrityCheck(s)
+				integrityErrors, err := checker.CheckIntegrity(cmd.Context())
 				if err != nil {
 					return fmt.Errorf("integrity check failed: %w", err)
 				}
@@ -92,6 +89,9 @@ Examples:
 					}
 					printIntegrityRecoveryHint(integrityErrors)
 				}
+				fmt.Println()
+			} else {
+				fmt.Printf("Skipping database integrity check (%s has no in-engine check — use the backend's admin tooling, e.g. pg_amcheck).\n", s.Backend())
 				fmt.Println()
 			}
 		}
@@ -284,37 +284,6 @@ Examples:
 
 		return nil
 	},
-}
-
-// runIntegrityCheck runs PRAGMA integrity_check on the database and returns
-// any error strings. An empty slice means the database is healthy.
-//
-// PostgreSQL has no in-engine analogue; its corruption checks live in
-// external admin tooling (pg_amcheck, pg_dump --section=data) that
-// require server-side privileges this CLI does not assume. On PG we
-// return no errors so the rest of `verify` (Gmail message round-trip)
-// still runs — the user is expected to monitor PG health separately.
-func runIntegrityCheck(s *store.Store) ([]string, error) {
-	if s.IsPostgreSQL() {
-		return nil, nil
-	}
-	rows, err := s.DB().Query("PRAGMA integrity_check(100)")
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-
-	var integErrs []string
-	for rows.Next() {
-		var result string
-		if err := rows.Scan(&result); err != nil {
-			return nil, err
-		}
-		if result != "ok" {
-			integErrs = append(integErrs, result)
-		}
-	}
-	return integErrs, rows.Err()
 }
 
 // printIntegrityRecoveryHint prints repair guidance tailored to the kind of

@@ -10,6 +10,8 @@ package query
 import (
 	"database/sql"
 	"errors"
+
+	"go.kenn.io/msgvault/internal/store"
 )
 
 // ErrNotImplemented is a sentinel returned by engine methods that the current
@@ -43,8 +45,10 @@ func NewPostgreSQLEngine(db *sql.DB) Engine {
 
 // NewEngine picks the appropriate engine for the given database. isPostgres
 // selects between PostgreSQLQueryDialect (true) and SQLiteQueryDialect (false).
-// This is the preferred entry point for callers that have a Store with an
-// unknown backend — pass store.IsPostgres() as the flag.
+//
+// Prefer NewEngineForStore, which derives the dialect from the Store so callers
+// never thread a backend boolean. This lower-level form remains for tests and
+// internal use.
 //
 // The return type is the Engine interface so the SQLite-only TextEngine
 // is hidden when isPostgres is true.
@@ -53,4 +57,12 @@ func NewEngine(db *sql.DB, isPostgres bool) Engine {
 		return NewPostgreSQLEngine(db)
 	}
 	return NewSQLiteEngine(db)
+}
+
+// NewEngineForStore builds the direct query engine for a Store, selecting the
+// SQL dialect from the store's backend. This is the single place engine
+// selection consults backend identity; callers ask the store for an engine
+// rather than re-deriving the dialect at each call site.
+func NewEngineForStore(s *store.Store) Engine {
+	return NewEngine(s.DB(), s.IsPostgreSQL())
 }

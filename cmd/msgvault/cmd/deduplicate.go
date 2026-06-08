@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bufio"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -543,19 +544,16 @@ func randomBatchToken() string {
 // with a pointer to --no-backup so the user can make an informed
 // choice (run pg_dump out-of-band, or skip the safety net).
 func backupDatabase(st *store.Store, dst string) error {
-	if st.IsPostgreSQL() {
-		return errors.New("backup-before-dedup is SQLite-only (uses VACUUM INTO); " +
-			"snapshot the PostgreSQL database with pg_dump out-of-band, " +
-			"then rerun with --no-backup",
-		)
+	backup, ok := st.SnapshotBackup()
+	if !ok {
+		return fmt.Errorf("backup-before-dedup is not supported on the %s backend "+
+			"(it uses SQLite VACUUM INTO); snapshot the database with the backend's "+
+			"native tooling out-of-band, then rerun with --no-backup", st.Backend())
 	}
 	if _, err := os.Stat(dst); err == nil {
 		return fmt.Errorf("backup target already exists: %s", dst)
 	}
-	if _, err := st.DB().Exec("VACUUM INTO ?", dst); err != nil {
-		return fmt.Errorf("vacuum into %s: %w", dst, err)
-	}
-	return nil
+	return backup.BackupTo(context.Background(), dst)
 }
 
 // loadPerSourceIdentities builds a per-source identity map for the given

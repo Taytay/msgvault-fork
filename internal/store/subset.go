@@ -34,6 +34,12 @@ func CopySubset(
 	if rowCount <= 0 {
 		return nil, fmt.Errorf("rowCount must be positive, got %d", rowCount)
 	}
+	// CopySubset is implemented with SQLite ATTACH DATABASE against local
+	// files; client/server backends cannot be a source. The check lives here,
+	// with the ATTACH logic it guards, rather than in the calling command.
+	if b := BackendOfDSN(srcDBPath); b != BackendSQLite {
+		return nil, fmt.Errorf("create-subset requires a local SQLite source database (it uses ATTACH DATABASE); %q is a %s backend", srcDBPath, b)
+	}
 
 	start := time.Now()
 

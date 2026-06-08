@@ -123,17 +123,16 @@ func TestMySQLDialect_RewriteUpsert(t *testing.T) {
 	})
 }
 
-// TestStore_URLDetection verifies the backend-selection helpers route mysql://
-// and dolt:// URLs to the MySQL/Dolt path.
+// TestStore_URLDetection verifies BackendOfDSN routes mysql:// and dolt://
+// URLs to the Dolt backend, postgres:// to PostgreSQL, and bare paths to SQLite.
 func TestStore_URLDetection(t *testing.T) {
 	assert := assertpkg.New(t)
-	assert.True(store.IsMySQLURL("mysql://root@127.0.0.1:3306/db"))
-	assert.True(store.IsMySQLURL("dolt://root@host/db"))
-	assert.False(store.IsMySQLURL("postgres://x/y"))
-	assert.False(store.IsMySQLURL("/var/lib/msgvault.db"))
-	assert.True(store.IsServerURL("mysql://x/y"))
-	assert.True(store.IsServerURL("postgresql://x/y"))
-	assert.False(store.IsServerURL("/tmp/x.db"))
+	assert.Equal(store.BackendDolt, store.BackendOfDSN("mysql://root@127.0.0.1:3306/db"))
+	assert.Equal(store.BackendDolt, store.BackendOfDSN("dolt://root@host/db"))
+	assert.Equal(store.BackendPostgreSQL, store.BackendOfDSN("postgres://x/y"))
+	assert.Equal(store.BackendPostgreSQL, store.BackendOfDSN("postgresql://x/y"))
+	assert.Equal(store.BackendSQLite, store.BackendOfDSN("/var/lib/msgvault.db"))
+	assert.Equal(store.BackendSQLite, store.BackendOfDSN("/tmp/x.db"))
 }
 
 // TestDolt_SchemaAndRoundtrip is the M0/M1 integration check: against a live

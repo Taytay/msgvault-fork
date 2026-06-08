@@ -91,7 +91,7 @@ func showLocalMessage(cmd *cobra.Command, idStr string) error {
 	}
 
 	// Create query engine
-	engine := query.NewEngine(s.DB(), s.IsPostgreSQL())
+	engine := query.NewEngineForStore(s)
 
 	// Try to parse as numeric ID first
 	var msg *query.MessageDetail

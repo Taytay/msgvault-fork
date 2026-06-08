@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 
@@ -32,12 +31,6 @@ Run it after syncing new mail into Dolt (or after 'dolt pull' on another
 machine). Rebuild embeddings separately with 'msgvault embeddings build'.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		dbURL := cfg.DatabaseDSN()
-		if !store.IsMySQLURL(dbURL) {
-			return errors.New(
-				"project is only for the Dolt backend; set [data].database_url " +
-					"to a mysql:// or dolt:// URL (SQLite/PostgreSQL backends are " +
-					"queried directly and use 'build-cache' instead)")
-		}
 		replicaPath := cfg.ReplicaPath()
 		analyticsDir := cfg.AnalyticsDir()
 		ctx := context.Background()
@@ -48,6 +41,16 @@ machine). Rebuild embeddings separately with 'msgvault embeddings build'.`,
 			return fmt.Errorf("open Dolt source: %w", err)
 		}
 		defer func() { _ = src.Close() }()
+
+		// project rebuilds the local replica FROM Dolt; it is meaningful only
+		// when Dolt is the system of record. SQLite/PostgreSQL backends are
+		// queried directly and use 'build-cache' instead.
+		if src.Backend() != store.BackendDolt {
+			return fmt.Errorf(
+				"project is only for the Dolt backend; set [data].database_url "+
+					"to a mysql:// or dolt:// URL (the %s backend is queried "+
+					"directly and uses 'build-cache' instead)", src.Backend())
+		}
 
 		// Fresh replica: remove any prior file so the rebuild is authoritative.
 		for _, suffix := range []string{"", "-wal", "-shm"} {

@@ -14,7 +14,18 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 	assertpkg "github.com/stretchr/testify/assert"
 	requirepkg "github.com/stretchr/testify/require"
+	"go.kenn.io/msgvault/internal/store"
 )
+
+// cacheNeedsBuildAt opens the store at dbPath and runs the staleness check,
+// mirroring how the commands now pass an already-open store to cacheNeedsBuild.
+func cacheNeedsBuildAt(t *testing.T, dbPath, analyticsDir string) cacheStaleness {
+	t.Helper()
+	s, err := store.Open(dbPath)
+	requirepkg.NoError(t, err, "open store")
+	defer func() { _ = s.Close() }()
+	return cacheNeedsBuild(s, analyticsDir)
+}
 
 // setupTestSQLite creates a test SQLite database with realistic email data.
 func setupTestSQLite(t *testing.T) string {
@@ -1381,19 +1392,6 @@ func TestCacheNeedsBuild(t *testing.T) {
 			wantReason: "invalid sync state",
 		},
 		{
-			name: "DBOpenFailure_NeedsBuild",
-			setup: func(t *testing.T, dbPath, analyticsDir string) {
-				t.Helper()
-				// Replace DB file with a directory so store.Open fails
-				_ = os.Remove(dbPath)
-				requirepkg.NoError(t, os.MkdirAll(dbPath, 0755), "MkdirAll")
-				writeSyncState(t, analyticsDir, 5)
-				createFakeParquet(t, analyticsDir)
-			},
-			wantBuild:  true,
-			wantReason: "cannot verify cache status",
-		},
-		{
 			name: "MissingRequiredParquetTables_NeedsBuild",
 			setup: func(t *testing.T, dbPath, analyticsDir string) {
 				t.Helper()
@@ -1423,7 +1421,7 @@ func TestCacheNeedsBuild(t *testing.T) {
 
 			tt.setup(t, dbPath, analyticsDir)
 
-			got := cacheNeedsBuild(dbPath, analyticsDir)
+			got := cacheNeedsBuildAt(t, dbPath, analyticsDir)
 			assertpkg.Equal(t, tt.wantBuild, got.NeedsBuild, "cacheNeedsBuild() build (reason: %q)", got.Reason)
 			if tt.wantReason != "" {
 				assertpkg.Equal(t, tt.wantReason, got.Reason, "cacheNeedsBuild() reason")
@@ -1475,7 +1473,7 @@ func TestCacheNeedsBuild_LabelOnlySyncRequiresFullRebuild(t *testing.T) {
 	)
 	require.NoError(err, "insert sync_run")
 
-	got := cacheNeedsBuild(dbPath, analyticsDir)
+	got := cacheNeedsBuildAt(t, dbPath, analyticsDir)
 	require.True(got.NeedsBuild, "cacheNeedsBuild() NeedsBuild = false, want true")
 	require.True(got.FullRebuild, "cacheNeedsBuild() FullRebuild = false, want true")
 	require.Contains(got.Reason, "updated", "cacheNeedsBuild() reason")
@@ -1532,7 +1530,7 @@ func TestCacheNeedsBuild_IgnoresAlreadyProcessedUpdatedSyncRun(t *testing.T) {
 	)
 	require.NoError(err, "insert sync_run")
 
-	got := cacheNeedsBuild(dbPath, analyticsDir)
+	got := cacheNeedsBuildAt(t, dbPath, analyticsDir)
 	require.False(got.NeedsBuild, "cacheNeedsBuild() = %+v, want no rebuild for already-processed sync run", got)
 }
 
@@ -1574,7 +1572,7 @@ func TestCacheNeedsBuild_DedupHidesAfterLastSync(t *testing.T) {
 	)
 	require.NoError(err, "insert dedup-hidden row")
 
-	got := cacheNeedsBuild(dbPath, analyticsDir)
+	got := cacheNeedsBuildAt(t, dbPath, analyticsDir)
 	require.True(got.NeedsBuild, "cacheNeedsBuild() = %+v, want NeedsBuild=true after dedup hide", got)
 	require.True(got.FullRebuild, "cacheNeedsBuild() = %+v, want FullRebuild=true after dedup hide", got)
 	assertpkg.Contains(t, got.Reason, "dedup-hidden", "Reason")

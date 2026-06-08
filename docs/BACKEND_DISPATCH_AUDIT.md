@@ -128,3 +128,50 @@ the query-engine boolean, then vector refusals.
 
 The factory dispatch in category A stays — that is where backend identity
 legitimately lives.
+
+## Resolution (implemented)
+
+The refactor landed. Backend identity now lives in exactly two sanctioned
+places, and behavioral differences are expressed as capabilities.
+
+### Where identity is allowed
+
+- `store.BackendOfDSN(dsn) Backend` — the single DSN sniffer. Used by the
+  `Open` factory and the rare pre-open file-existence guard (`build-cache`,
+  `create-subset`), where there is no opened store to ask yet.
+- `Store.Backend() Backend` + `Backend.String()` — for the query-engine
+  dialect factory (`query.NewEngineForStore`) and human-readable messages.
+
+The old free functions `IsPostgresURL` / `IsMySQLURL` / `IsServerURL` are gone.
+
+### Capabilities (the pattern to extend)
+
+Optional capabilities are discovered via `Store` accessors returning
+`(Capability, bool)`, exactly like the pre-existing `FTSIndexer`
+(`fts.go`) and `VersionController` (`version.go`):
+
+| Capability | Accessor | Implemented by | Replaces |
+|---|---|---|---|
+| `AnalyticsCache` | `Store.AnalyticsCache()` / `RequireAnalyticsCache()` | local-file SQLite | build-cache, cacheNeedsBuild, tui/serve cache, read-engine selection |
+| `IntegrityChecker` | `Store.IntegrityChecker()` | local-file SQLite | `verify` |
+| `SnapshotBackup` | `Store.SnapshotBackup()` | local-file SQLite | `deduplicate` backup |
+
+`query.OpenReadEngine` now takes a `*store.Store` and decides the Parquet vs.
+direct path purely from `AnalyticsCache` presence; the `IsPostgres bool`
+option is gone. The seven `query.NewEngine(db, s.IsPostgreSQL())` call sites
+collapsed to `query.NewEngineForStore(s)`.
+
+`UnsupportedError` carries a backend-authored remediation hint (e.g. the Dolt
+"run 'msgvault project'" advice), so refusing commands surface guidance
+without branching on backend type.
+
+### Adding a new backend
+
+1. Add a `Backend` constant and a `BackendOfDSN` case (factory only).
+2. Implement the `Dialect` interface (required SQL behavior).
+3. Implement whichever capability interfaces the backend supports; the
+   accessors hand them out and every call site Just Works. Implement none and
+   the backend is still fully usable for core storage — the cache, integrity,
+   backup, and FTS paths become clean no-ops or typed "unsupported" errors.
+
+No command or query call site needs editing to onboard a backend.
