@@ -59,54 +59,11 @@ type Dialect interface {
 	// PostgreSQL: " ON CONFLICT DO NOTHING"
 	InsertOrIgnoreSuffix() string
 
-	// Full-text search
-
-	// FTSUpsert inserts or updates the search index for a single message.
-	// The dialect owns both the SQL and the argument shape, so SQLite's
-	// FTS5 rowid duplication stays out of the caller and PostgreSQL is
-	// free to use a column-update on messages.
-	FTSUpsert(q querier, doc FTSDoc) error
-
-	// FTSSearchClause returns SQL fragments for full-text search using ?
-	// placeholders. Returns: join clause, where clause, order-by clause,
-	// and the number of times the caller must re-bind the search term to
-	// satisfy ? placeholders that appear in orderBy (SQLite: 0, because
-	// "rank" is an implicit FTS5 column; PostgreSQL: 1 for ts_rank).
-	// Callers compose these with their own SQL and must run Rebind on the
-	// final query before execution.
-	FTSSearchClause() (join, where, orderBy string, orderArgCount int)
-
-	// FTSDeleteSQL returns the SQL to remove FTS entries for messages belonging to
-	// a given source. Takes one parameter: source_id.
-	FTSDeleteSQL() string
-
-	// FTSBackfillBatchSQL returns the SQL to populate the search index for a range of message IDs.
-	// Uses two ? placeholders for the ID range: WHERE m.id >= ? AND m.id < ?
-	FTSBackfillBatchSQL() string
-
-	// FTSAvailable reports whether full-text search is available for this database.
-	// For SQLite this probes the FTS5 virtual table; for PostgreSQL it checks
-	// that the tsvector column exists.
-	FTSAvailable(db *sql.DB) bool
-
-	// FTSNeedsBackfill reports whether the FTS index needs to be populated.
-	FTSNeedsBackfill(db *sql.DB) bool
-
-	// FTSClearSQL returns the SQL to clear all FTS data before a full backfill.
-	FTSClearSQL() string
-
-	// SchemaFTS returns the embedded filename containing FTS DDL to execute during
-	// schema initialization. Returns "" if no separate FTS schema file is needed
-	// (e.g., PostgreSQL includes tsvector in its main schema).
-	SchemaFTS() string
-
-	// FTSRebuildSchema tears down and recreates the FTS infrastructure from
-	// scratch — the caller is expected to follow up with a full backfill.
-	// Used to recover from malformed FTS shadow-table state that in-place
-	// rebuild operations (e.g., SQLite's rebuild pragma) cannot clear.
-	// SQLite: DROP TABLE IF EXISTS messages_fts + re-execute schema_sqlite.sql.
-	// PostgreSQL: TODO (REINDEX / recompute tsvector column).
-	FTSRebuildSchema(db *sql.DB) error
+	// Full-text search is an OPTIONAL capability, not part of the core
+	// Dialect: SQLite and PostgreSQL implement the FTSIndexer interface
+	// (see fts.go), while MySQL/Dolt does not. Callers reach it via
+	// Store.ftsIndexer() (a type assertion), so the common Dialect does not
+	// force every backend to answer FTS questions it has no answer for.
 
 	// LegacyColumnMigrations returns ALTER TABLE ADD COLUMN statements to
 	// bring older databases up to date with schema columns added over time.
@@ -173,21 +130,6 @@ type Dialect interface {
 	// (emit "col = 1"); PostgreSQL has a real BOOLEAN type and rejects
 	// integer comparisons against it, so the bare column name is correct.
 	BoolTrueExpr(col string) string
-
-	// BuildFTSArg formats a slice of user-supplied search terms into the
-	// single string argument that FTSSearchClause's WHERE fragment binds
-	// against the dialect's FTS function. Both dialects emit prefix-match
-	// arguments and drop terms that contain no usable tokens:
-	//   SQLite:     `"term"*` per term, space-joined (FTS5 reads space as
-	//               implicit AND).
-	//   PostgreSQL: `term:*` per term, joined by " & " (to_tsquery).
-	// Shapes match the query package's equivalent helpers so API search
-	// and engine deep-search return the same hits for the same input.
-	// Returns "" when every term reduces to nothing usable — the caller
-	// must substitute a FALSE predicate instead of dispatching the
-	// dialect's FTS WHERE clause (an empty argument errors at both
-	// to_tsquery and the FTS5 MATCH parser).
-	BuildFTSArg(terms []string) string
 
 	// JSONBindExpr returns the SQL fragment to use in place of a bare ?
 	// when binding a Go string (or []byte) to a JSON column. SQLite has

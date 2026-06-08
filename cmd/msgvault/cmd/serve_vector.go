@@ -9,35 +9,95 @@ import (
 	"path/filepath"
 
 	"go.kenn.io/msgvault/internal/store"
+	"go.kenn.io/msgvault/internal/vector"
+	"go.kenn.io/msgvault/internal/vector/doltvec"
 	"go.kenn.io/msgvault/internal/vector/embed"
 	"go.kenn.io/msgvault/internal/vector/hybrid"
 	"go.kenn.io/msgvault/internal/vector/sqlitevec"
 )
 
-// setupVectorFeatures opens vectors.db and builds the vector backend,
-// hybrid engine, embed worker, and enqueuer used by the serve daemon
-// and the MCP command. Returns (nil, nil) when cfg.Vector.Enabled is
-// false. The returned Close function must be called on shutdown.
+// setupVectorFeatures opens the vector backend and builds the hybrid engine,
+// embed worker, and enqueuer used by the serve daemon and the MCP command.
+// Returns (nil, nil) when cfg.Vector.Enabled is false. The returned Close
+// function must be called on shutdown.
 //
-// mainDB is the already-opened handle to msgvault.db; mainPath is the
-// filesystem path used by FusedSearch to ATTACH vectors.db on a fresh
-// connection.
+// Backend selection follows the system of record:
+//   - Dolt (mysql://): doltvec, co-located with the messages. The shared
+//     embed.Worker drives it via an injected doltvec.Queue. (Daemon
+//     auto-activation is gated behind a sqlite-specific pending count, so it
+//     is skipped on Dolt for now — embeddings still build; activation is a
+//     follow-up via Backend.Stats.)
+//   - SQLite file: sqlitevec (separate vectors.db, ATTACH-based FusedSearch).
+//
+// mainDB is the already-opened store handle; mainPath is its DSN/path.
 func setupVectorFeatures(ctx context.Context, mainDB *sql.DB, mainPath string) (*vectorFeatures, error) {
 	if !cfg.Vector.Enabled {
 		return nil, nil //nolint:nilnil // vector disabled: callers nil-check vf; (nil, nil) means "no features, no error"
 	}
-	// The vector backend uses sqlite-vec extension and `ATTACH DATABASE`
-	// to fuse vectors.db onto the main store — both SQLite-only. Refuse
-	// up-front on a PG DSN rather than letting one of the four downstream
-	// callers feed `sql.Open("sqlite3", "postgres://…")` or dispatch raw
-	// ? placeholders against pgx. Vector support for PostgreSQL is
-	// tracked under PR4 (see docs/PG_STATUS.md).
 	if store.IsPostgresURL(mainPath) {
 		return nil, fmt.Errorf(
 			"vector features are SQLite-only; set [vector] enabled = false to use msgvault with PostgreSQL (vector support is planned for PR4)")
 	}
 	if err := cfg.Vector.Validate(); err != nil {
 		return nil, fmt.Errorf("vector config: %w", err)
+	}
+
+	client := embed.NewClient(embed.Config{
+		Endpoint:   cfg.Vector.Embeddings.Endpoint,
+		APIKey:     cfg.Vector.Embeddings.APIKey(),
+		Model:      cfg.Vector.Embeddings.Model,
+		Dimension:  cfg.Vector.Embeddings.Dimension,
+		Timeout:    cfg.Vector.Embeddings.Timeout,
+		MaxRetries: cfg.Vector.Embeddings.MaxRetries,
+	})
+
+	hybridCfg := hybrid.Config{
+		ExpectedFingerprint: cfg.Vector.GenerationFingerprint(),
+		RRFK:                cfg.Vector.Search.RRFK,
+		KPerSignal:          cfg.Vector.Search.KPerSignal,
+		SubjectBoost:        cfg.Vector.Search.SubjectBoost,
+	}
+
+	// Resolve the effective backend. "auto" follows the system of record.
+	kind := cfg.Vector.Backend
+	if kind == "" || kind == "auto" {
+		if store.IsMySQLURL(mainPath) {
+			kind = "dolt"
+		} else {
+			kind = "sqlite-vec"
+		}
+	}
+
+	// Dolt backend: search served directly from the system of record.
+	if kind == "dolt" {
+		if !store.IsMySQLURL(mainPath) {
+			return nil, fmt.Errorf("vector.backend=\"dolt\" requires a Dolt (mysql://) store; got %q", mainPath)
+		}
+		backend, err := doltvec.Open(ctx, doltvec.Options{
+			DB:        mainDB,
+			Dimension: cfg.Vector.Embeddings.Dimension,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("open dolt vector backend: %w", err)
+		}
+		// The shared embed.Worker drives the Dolt backend by injecting a
+		// doltvec.Queue (the only sqlite-coupled collaborator). The main-DB
+		// text query and Backend.Upsert are already backend-agnostic.
+		worker := embed.NewWorker(newWorkerDeps(backend, doltvec.NewQueue(mainDB), nil, mainDB, client))
+		return &vectorFeatures{
+			Backend:      backend,
+			HybridEngine: hybrid.NewEngine(backend, mainDB, client, hybridCfg),
+			Enqueuer:     doltvec.NewEnqueuer(mainDB),
+			Worker:       worker,
+			Cfg:          cfg.Vector,
+			Close:        backend.Close,
+		}, nil
+	}
+
+	// SQLite backend: separate vectors.db with the sqlite-vec extension.
+	if store.IsMySQLURL(mainPath) {
+		return nil, fmt.Errorf(
+			"vector.backend=\"sqlite-vec\" cannot run against a Dolt store; set [vector].backend = \"dolt\" or \"auto\"")
 	}
 	if err := sqlitevec.RegisterExtension(); err != nil {
 		return nil, fmt.Errorf("register sqlite-vec: %w", err)
@@ -57,18 +117,26 @@ func setupVectorFeatures(ctx context.Context, mainDB *sql.DB, mainPath string) (
 		return nil, fmt.Errorf("open vectors.db: %w", err)
 	}
 
-	client := embed.NewClient(embed.Config{
-		Endpoint:   cfg.Vector.Embeddings.Endpoint,
-		APIKey:     cfg.Vector.Embeddings.APIKey(),
-		Model:      cfg.Vector.Embeddings.Model,
-		Dimension:  cfg.Vector.Embeddings.Dimension,
-		Timeout:    cfg.Vector.Embeddings.Timeout,
-		MaxRetries: cfg.Vector.Embeddings.MaxRetries,
-	})
+	worker := embed.NewWorker(newWorkerDeps(backend, nil, backend.DB(), mainDB, client))
 
-	worker := embed.NewWorker(embed.WorkerDeps{
+	return &vectorFeatures{
+		Backend:      backend,
+		HybridEngine: hybrid.NewEngine(backend, mainDB, client, hybridCfg),
+		Enqueuer:     embed.NewEnqueuer(backend.DB()),
+		Worker:       worker,
+		Cfg:          cfg.Vector,
+		Close:        backend.Close,
+	}, nil
+}
+
+// newWorkerDeps assembles embed.WorkerDeps from the current config plus the
+// per-backend collaborators. queue may be nil (NewWorker then defaults to a
+// sqlite-vec Queue over vectorsDB); inject a doltvec.Queue for the Dolt path.
+func newWorkerDeps(backend vector.Backend, queue embed.PendingQueue, vectorsDB, mainDB *sql.DB, client embed.EmbeddingClient) embed.WorkerDeps {
+	return embed.WorkerDeps{
 		Backend:   backend,
-		VectorsDB: backend.DB(),
+		Queue:     queue,
+		VectorsDB: vectorsDB,
 		MainDB:    mainDB,
 		Client:    client,
 		Preprocess: embed.PreprocessConfig{
@@ -84,24 +152,5 @@ func setupVectorFeatures(ctx context.Context, mainDB *sql.DB, mainPath string) (
 		EmbedTimeout:    cfg.Vector.Embeddings.Timeout,
 		EmbedMaxRetries: cfg.Vector.Embeddings.MaxRetries,
 		Log:             logger,
-	})
-
-	engine := hybrid.NewEngine(backend, mainDB, client, hybrid.Config{
-		ExpectedFingerprint: cfg.Vector.GenerationFingerprint(),
-		RRFK:                cfg.Vector.Search.RRFK,
-		KPerSignal:          cfg.Vector.Search.KPerSignal,
-		SubjectBoost:        cfg.Vector.Search.SubjectBoost,
-	})
-
-	enqueuer := embed.NewEnqueuer(backend.DB())
-
-	return &vectorFeatures{
-		Backend:      backend,
-		HybridEngine: engine,
-		Enqueuer:     enqueuer,
-		Worker:       worker,
-		Cfg:          cfg.Vector,
-		VectorsDB:    backend.DB(),
-		Close:        backend.Close,
-	}, nil
+	}
 }

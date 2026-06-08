@@ -1,8 +1,6 @@
 package cmd
 
 import (
-	"database/sql"
-
 	"go.kenn.io/msgvault/internal/sync"
 	"go.kenn.io/msgvault/internal/vector"
 	"go.kenn.io/msgvault/internal/vector/embed"
@@ -23,11 +21,6 @@ type vectorFeatures struct {
 	Enqueuer     sync.EmbedEnqueuer
 	Worker       *embed.Worker
 	Cfg          vector.Config
-	// VectorsDB is the underlying vectors.db handle. The daemon's
-	// EmbedJob uses it to count pending_embeddings for the
-	// activation gate; other consumers should prefer the higher-
-	// level Backend abstraction.
-	VectorsDB *sql.DB
 	// Close releases the underlying vectors.db handle. Every caller
 	// that receives a non-nil vectorFeatures must invoke Close during
 	// shutdown so WAL checkpoints complete.

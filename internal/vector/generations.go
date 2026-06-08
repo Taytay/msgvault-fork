@@ -22,8 +22,11 @@ import (
 //   - ErrNotEnabled: no generation exists at all (vector search not
 //     initialized).
 //
-// Any other error from the Backend is wrapped and returned as-is.
-func ResolveActiveForFingerprint(ctx context.Context, b Backend, fingerprint string) (Generation, error) {
+// Any other error from the backend is wrapped and returned as-is.
+//
+// Takes a GenerationReader: resolving the active generation needs only
+// the generation-state reads, not the full Backend.
+func ResolveActiveForFingerprint(ctx context.Context, b GenerationReader, fingerprint string) (Generation, error) {
 	active, err := b.ActiveGeneration(ctx)
 	if err == nil {
 		if fingerprint != "" && active.Fingerprint != fingerprint {

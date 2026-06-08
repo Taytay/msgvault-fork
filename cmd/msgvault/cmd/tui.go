@@ -111,49 +111,30 @@ Remote Mode:
 			// cacheNeedsBuild dispatches ? placeholders that pgx
 			// rejects. On PG, skip the entire cache pipeline and go
 			// straight to the dialect-aware query engine.
-			if s.IsPostgreSQL() {
-				engine = query.NewEngine(s.DB(), true)
-			} else {
-				// Check if cache needs to be built/updated (unless forcing SQL or skipping)
-				if !forceSQL && !skipCacheBuild {
-					staleness := cacheNeedsBuild(dbPath, analyticsDir)
-					if staleness.NeedsBuild {
-						fmt.Printf("Building analytics cache (%s)...\n", staleness.Reason)
-						result, err := buildCache(dbPath, analyticsDir, staleness.FullRebuild)
-						if err != nil {
-							fmt.Fprintf(os.Stderr, "Warning: Failed to build cache: %v\n", err)
-							fmt.Fprintf(os.Stderr, "Falling back to SQLite (may be slow for large archives)\n")
-						} else if !result.Skipped {
-							fmt.Printf("Cached %d messages for fast queries.\n", result.ExportedCount)
-						}
-					}
-				}
-
-				// Determine query engine to use
-				if !forceSQL && query.HasCompleteParquetData(analyticsDir) {
-					// Use DuckDB for fast Parquet queries
-					var duckOpts query.DuckDBOptions
-					if noSQLiteScanner {
-						duckOpts.DisableSQLiteScanner = true
-					}
-					duckEngine, err := query.NewDuckDBEngine(analyticsDir, dbPath, s.DB(), duckOpts)
+			// Build/refresh the Parquet cache if stale (SQLite-only ETL; the
+			// factory below skips the cache entirely on PostgreSQL). Engine
+			// *selection* is delegated to query.OpenReadEngine, shared with
+			// the serve and mcp commands.
+			if !s.IsPostgreSQL() && !forceSQL && !skipCacheBuild {
+				staleness := cacheNeedsBuild(dbPath, analyticsDir)
+				if staleness.NeedsBuild {
+					fmt.Printf("Building analytics cache (%s)...\n", staleness.Reason)
+					result, err := buildCache(dbPath, analyticsDir, staleness.FullRebuild)
 					if err != nil {
-						fmt.Fprintf(os.Stderr, "Warning: Failed to open Parquet engine: %v\n", err)
-						fmt.Fprintf(os.Stderr, "Falling back to SQLite (may be slow for large archives)\n")
-						engine = query.NewEngine(s.DB(), false)
-					} else {
-						engine = duckEngine
-						defer func() { _ = duckEngine.Close() }()
+						fmt.Fprintf(os.Stderr, "Warning: Failed to build cache: %v\n", err)
+					} else if !result.Skipped {
+						fmt.Printf("Cached %d messages for fast queries.\n", result.ExportedCount)
 					}
-				} else {
-					// Use SQLite directly
-					if !forceSQL {
-						fmt.Fprintf(os.Stderr, "Note: No cache data available, using SQLite (slow for large archives)\n")
-						fmt.Fprintf(os.Stderr, "Run 'msgvault build-cache' to enable fast queries.\n")
-					}
-					engine = query.NewEngine(s.DB(), false)
 				}
 			}
+
+			engine = query.OpenReadEngine(s.DB(), dbPath, query.ReadEngineOptions{
+				AnalyticsDir:         analyticsDir,
+				IsPostgres:           s.IsPostgreSQL(),
+				ForceSQL:             forceSQL,
+				DisableSQLiteScanner: noSQLiteScanner,
+			})
+			defer func() { _ = engine.Close() }()
 		}
 
 		// Check if engine supports text queries

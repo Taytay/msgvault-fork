@@ -262,7 +262,10 @@ func (s *Store) UpdateSyncCheckpoint(syncID int64, cp *Checkpoint) error {
 	return err
 }
 
-// CompleteSync marks a sync as successfully completed.
+// CompleteSync marks a sync as successfully completed. On a version-controlled
+// backend (Dolt) it then snapshots the data store with a commit summarizing the
+// run — see commitSyncBoundary. The commit is best-effort and never fails the
+// sync; on other backends it is a no-op.
 func (s *Store) CompleteSync(syncID int64, finalHistoryID string) error {
 	_, err := s.db.Exec(fmt.Sprintf(`
 		UPDATE sync_runs
@@ -271,7 +274,11 @@ func (s *Store) CompleteSync(syncID int64, finalHistoryID string) error {
 		    cursor_after = ?
 		WHERE id = ?
 	`, s.dialect.Now()), finalHistoryID, syncID)
-	return err
+	if err != nil {
+		return err
+	}
+	s.commitSyncBoundary(syncID)
+	return nil
 }
 
 // FailSync marks a sync as failed with an error message.

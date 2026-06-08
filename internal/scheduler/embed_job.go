@@ -2,7 +2,6 @@ package scheduler
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"log/slog"
 	"sync"
@@ -33,14 +32,14 @@ type EmbedRunner interface {
 // another is already in flight returns immediately (drop-not-queue —
 // the next tick will pick up whatever was missed).
 type EmbedJob struct {
-	Worker  EmbedRunner
-	Backend vector.Backend
+	Worker EmbedRunner
+	// Backend is the generation-lifecycle surface: EmbedJob inspects
+	// generation state, ensures the seed, reads pending counts, and
+	// activates a drained build. It never reads vectors or writes
+	// embeddings, so it depends on vector.GenerationLifecycle, not the full
+	// vector.Backend.
+	Backend vector.GenerationLifecycle
 	Log     *slog.Logger
-
-	// VectorsDB is the vectors.db handle, used to count remaining
-	// pending_embeddings for activation gating. May be nil; in that
-	// case the daemon will not auto-activate building generations.
-	VectorsDB *sql.DB
 
 	// Fingerprint is the configured generation fingerprint (typically
 	// vector.Config.GenerationFingerprint() — "model:dim:preprocess").
@@ -134,16 +133,15 @@ func (j *EmbedJob) Run(ctx context.Context) {
 	// moving target. This is by design — at steady state every
 	// active generation has incremental rows showing up between
 	// runs, so the activation gate must not require a snapshot.
-	if j.VectorsDB == nil {
-		log.Debug("embed: building drained but VectorsDB not wired; skipping auto-activation",
-			"gen", target)
-		return
-	}
-	remaining, err := j.pendingCount(ctx, target)
+	// Count remaining pending work through the backend abstraction so the
+	// gate is backend-agnostic (sqlite-vec, doltvec, …) rather than tied to a
+	// concrete pending_embeddings query on a raw handle.
+	stats, err := j.Backend.Stats(ctx, target)
 	if err != nil {
 		log.Warn("embed: count pending after run failed", "gen", target, "error", err)
 		return
 	}
+	remaining := stats.PendingCount
 	if remaining > 0 {
 		log.Info("embed: building generation still has pending rows; will retry next tick",
 			"gen", target, "remaining", remaining)
@@ -217,15 +215,4 @@ func (j *EmbedJob) pickTarget(ctx context.Context, log *slog.Logger) (vector.Gen
 		log.Warn("embed: active generation lookup failed", "error", err)
 		return 0, false, false
 	}
-}
-
-// pendingCount returns the number of pending_embeddings rows for gen.
-// Used by the activation gate.
-func (j *EmbedJob) pendingCount(ctx context.Context, gen vector.GenerationID) (int, error) {
-	var n int
-	if err := j.VectorsDB.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM pending_embeddings WHERE generation_id = ?`, int64(gen)).Scan(&n); err != nil {
-		return 0, err
-	}
-	return n, nil
 }

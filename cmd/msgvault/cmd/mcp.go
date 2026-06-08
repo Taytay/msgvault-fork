@@ -67,26 +67,13 @@ Add to Claude Desktop config:
 					"until 'msgvault tui' or 'msgvault search' is run\n")
 		}
 
-		var engine query.Engine
-		analyticsDir := cfg.AnalyticsDir()
-
-		if !mcpForceSQL && query.HasCompleteParquetData(analyticsDir) {
-			var duckOpts query.DuckDBOptions
-			if mcpNoSQLiteScanner {
-				duckOpts.DisableSQLiteScanner = true
-			}
-			duckEngine, err := query.NewDuckDBEngine(analyticsDir, dbPath, s.DB(), duckOpts)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: Failed to open Parquet engine: %v\n", err)
-				fmt.Fprintf(os.Stderr, "Falling back to SQLite\n")
-				engine = query.NewEngine(s.DB(), s.IsPostgreSQL())
-			} else {
-				engine = duckEngine
-				defer func() { _ = duckEngine.Close() }()
-			}
-		} else {
-			engine = query.NewEngine(s.DB(), s.IsPostgreSQL())
-		}
+		engine := query.OpenReadEngine(s.DB(), dbPath, query.ReadEngineOptions{
+			AnalyticsDir:         cfg.AnalyticsDir(),
+			IsPostgres:           s.IsPostgreSQL(),
+			ForceSQL:             mcpForceSQL,
+			DisableSQLiteScanner: mcpNoSQLiteScanner,
+		})
+		defer func() { _ = engine.Close() }()
 
 		// Derive from cmd.Context() so signal handling installed by
 		// the cobra root command (SIGINT/SIGTERM → ctx.Done()) reaches

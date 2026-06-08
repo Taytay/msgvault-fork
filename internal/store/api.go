@@ -334,11 +334,12 @@ func (s *Store) searchMessagesQueryImpl(
 	// FTS text terms. ftsEnabled is the authoritative signal that FTS is
 	// active — ftsJoin may be empty on dialects (e.g. PostgreSQL) whose
 	// tsvector lives on the main table and needs no extra join.
-	ftsEnabled := len(q.TextTerms) > 0 && ftsAvailable
+	ftsIdx, ftsCap := s.ftsIndexer()
+	ftsEnabled := len(q.TextTerms) > 0 && ftsAvailable && ftsCap
 	var ftsJoin, ftsOrder, ftsExpr string
 	var ftsOrderArgCount int
 	if ftsEnabled {
-		ftsExpr = s.dialect.BuildFTSArg(q.TextTerms)
+		ftsExpr = ftsIdx.BuildFTSArg(q.TextTerms)
 		if ftsExpr == "" {
 			// Every text term reduced to nothing usable (punctuation-
 			// only input like "!!!" or "---"). Dispatching the dialect's
@@ -351,7 +352,7 @@ func (s *Store) searchMessagesQueryImpl(
 			conditions = append(conditions, "FALSE")
 			ftsEnabled = false
 		} else {
-			join, where, orderBy, orderArgCount := s.dialect.FTSSearchClause()
+			join, where, orderBy, orderArgCount := ftsIdx.FTSSearchClause()
 			ftsJoin = join
 			ftsOrder = orderBy
 			ftsOrderArgCount = orderArgCount

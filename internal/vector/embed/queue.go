@@ -13,6 +13,22 @@ import (
 	"go.kenn.io/msgvault/internal/vector"
 )
 
+// PendingQueue is the crash-safe claim → complete/release → reclaim contract
+// the Worker drives. Decoupling the Worker from a concrete queue lets a single
+// Worker drain any backend's pending store: *Queue is the sqlite-vec
+// implementation (this file); doltvec.Queue is the Dolt one.
+type PendingQueue interface {
+	// Claim marks up to batch available rows for gen with a fresh token,
+	// returning their message IDs (ascending) and the token.
+	Claim(ctx context.Context, gen vector.GenerationID, batch int) ([]int64, string, error)
+	// Complete removes claimed rows whose claim_token matches token.
+	Complete(ctx context.Context, gen vector.GenerationID, token string, ids []int64) error
+	// Release returns claimed rows (matching token) to the pool.
+	Release(ctx context.Context, gen vector.GenerationID, token string, ids []int64) error
+	// ReclaimStale clears claims older than olderThan; returns rows reclaimed.
+	ReclaimStale(ctx context.Context, olderThan time.Duration) (int, error)
+}
+
 // Queue wraps pending_embeddings with a crash-safe claim-mark-complete
 // pattern. A claim atomically marks up to N available rows with a token
 // and the current timestamp; Complete deletes the rows (on success) and
@@ -22,6 +38,9 @@ import (
 type Queue struct {
 	db *sql.DB
 }
+
+// Compile-time check that *Queue satisfies the PendingQueue contract.
+var _ PendingQueue = (*Queue)(nil)
 
 // NewQueue returns a Queue bound to db. The caller retains ownership of
 // db; Queue does not close it.

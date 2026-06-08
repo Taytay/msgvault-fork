@@ -948,7 +948,11 @@ func (s *Store) UpsertFTS(messageID int64, subject, bodyText, fromAddr, toAddrs,
 	if !s.fts5Available {
 		return nil
 	}
-	return s.dialect.FTSUpsert(s.db, FTSDoc{
+	idx, ok := s.ftsIndexer()
+	if !ok {
+		return nil
+	}
+	return idx.FTSUpsert(s.db, FTSDoc{
 		MessageID: messageID,
 		Subject:   subject,
 		Body:      bodyText,
@@ -973,6 +977,10 @@ func (s *Store) BackfillFTS(progress func(done, total int64)) (int64, error) {
 	if !s.fts5Available {
 		return 0, nil
 	}
+	idx, ok := s.ftsIndexer()
+	if !ok {
+		return 0, nil
+	}
 
 	minID, maxID, err := s.messageIDRange()
 	if err != nil {
@@ -982,7 +990,7 @@ func (s *Store) BackfillFTS(progress func(done, total int64)) (int64, error) {
 		return 0, nil
 	}
 
-	if _, err := s.db.Exec(s.dialect.FTSClearSQL()); err != nil {
+	if _, err := s.db.Exec(idx.FTSClearSQL()); err != nil {
 		return 0, fmt.Errorf("clear FTS: %w", err)
 	}
 
@@ -998,7 +1006,11 @@ func (s *Store) BackfillFTS(progress func(done, total int64)) (int64, error) {
 // exists to recover from. On successful completion, fts5Available is set to
 // true. Returns an error if the binary was built without FTS5 support.
 func (s *Store) RebuildFTS(progress func(done, total int64)) (int64, error) {
-	if err := s.dialect.FTSRebuildSchema(s.db.DB); err != nil {
+	idx, ok := s.ftsIndexer()
+	if !ok {
+		return 0, fmt.Errorf("full-text search is not supported by this backend")
+	}
+	if err := idx.FTSRebuildSchema(s.db.DB); err != nil {
 		return 0, err
 	}
 
@@ -1060,8 +1072,13 @@ func (s *Store) backfillFTSRange(minID, maxID int64, progress func(done, total i
 }
 
 // backfillFTSBatch inserts FTS rows for messages with id in [fromID, toID).
+// Only reached when the backend supports FTS (BackfillFTS/RebuildFTS gate it).
 func (s *Store) backfillFTSBatch(fromID, toID int64) (int64, error) {
-	result, err := s.db.Exec(s.dialect.FTSBackfillBatchSQL(), fromID, toID)
+	idx, ok := s.ftsIndexer()
+	if !ok {
+		return 0, fmt.Errorf("full-text search is not supported by this backend")
+	}
+	result, err := s.db.Exec(idx.FTSBackfillBatchSQL(), fromID, toID)
 	if err != nil {
 		return 0, err
 	}
