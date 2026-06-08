@@ -455,6 +455,13 @@ func (c *Config) AnalyticsDir() string {
 	return filepath.Join(c.Data.DataDir, "analytics")
 }
 
+// ReplicaPath returns the on-disk path of the local SQLite read-replica that is
+// rebuilt from the Dolt system of record by `msgvault project`. Only used when
+// [data].database_url points at a Dolt/MySQL backend.
+func (c *Config) ReplicaPath() string {
+	return filepath.Join(c.Data.DataDir, "replica.db")
+}
+
 // LogsDir returns the path to the logs directory. Uses [log].dir
 // from config when set; otherwise falls back to <data_dir>/logs.
 func (c *Config) LogsDir() string {

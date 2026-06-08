@@ -27,7 +27,14 @@ type EmbeddingClient interface {
 // floor (see NewWorker), MaxConsecutiveFailures defaults to 5, Log
 // defaults to slog.Default().
 type WorkerDeps struct {
-	Backend        vector.Backend
+	// Backend receives the embeddings the Worker produces. The Worker
+	// only writes (Upsert), so it depends on vector.EmbeddingWriter, not the
+	// full vector.Backend.
+	Backend vector.EmbeddingWriter
+	// Queue is the pending-work queue to drain. When nil, NewWorker defaults
+	// to a sqlite-vec Queue over VectorsDB. Inject a backend-specific
+	// implementation (e.g. doltvec.Queue) to drive a non-sqlite store.
+	Queue          PendingQueue
 	VectorsDB      *sql.DB
 	MainDB         *sql.DB
 	Client         EmbeddingClient
@@ -83,13 +90,17 @@ type ProgressReport struct {
 // and DB handles.
 type Worker struct {
 	deps     WorkerDeps
-	q        *Queue
+	q        PendingQueue
 	runStart time.Time // valid only during a RunOnce call
 }
 
 // NewWorker constructs a Worker, applying defaults for BatchSize (32),
 // StaleThreshold (auto-derived; see derivedStaleThreshold),
 // MaxConsecutiveFailures (5), and Log (slog.Default()).
+//
+// The pending queue is taken from WorkerDeps.Queue when set (inject a
+// backend-specific PendingQueue, e.g. doltvec.Queue); otherwise it defaults to
+// a sqlite-vec Queue over VectorsDB.
 func NewWorker(d WorkerDeps) *Worker {
 	if d.Log == nil {
 		d.Log = slog.Default()
@@ -103,7 +114,11 @@ func NewWorker(d WorkerDeps) *Worker {
 	if d.MaxConsecutiveFailures == 0 {
 		d.MaxConsecutiveFailures = 5
 	}
-	return &Worker{deps: d, q: NewQueue(d.VectorsDB)}
+	q := d.Queue
+	if q == nil {
+		q = NewQueue(d.VectorsDB)
+	}
+	return &Worker{deps: d, q: q}
 }
 
 // derivedStaleThreshold picks a default StaleThreshold from the

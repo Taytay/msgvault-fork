@@ -116,37 +116,19 @@ func runServe(cmd *cobra.Command, args []string) error {
 		}
 	}()
 
-	// Create query engine for TUI aggregate support.
-	// Prefer DuckDB over Parquet when the cache is complete and fresh;
-	// otherwise fall back to SQLite so remote endpoints still work.
-	// PostgreSQL bypasses the cache entirely — it is a SQLite-only ETL.
+	// Create the query engine for TUI aggregate support. The daemon does not
+	// build the cache here (the scheduler keeps it fresh); it only treats a
+	// stale cache as unusable so aggregates never read behind the DB.
 	analyticsDir := cfg.AnalyticsDir()
-	var engine query.Engine
-	if s.IsPostgreSQL() {
-		engine = query.NewEngine(s.DB(), true)
-	} else {
-		staleness := cacheNeedsBuild(dbPath, analyticsDir)
-		if !staleness.NeedsBuild && query.HasCompleteParquetData(analyticsDir) {
-			duckEngine, engineErr := query.NewDuckDBEngine(
-				analyticsDir, dbPath, s.DB(),
-			)
-			if engineErr != nil {
-				logger.Warn("DuckDB engine failed, falling back to SQLite",
-					"error", engineErr)
-				engine = query.NewEngine(s.DB(), false)
-			} else {
-				engine = duckEngine
-			}
-		} else {
-			if staleness.Reason != "" {
-				logger.Info("parquet cache not usable, using SQLite engine",
-					"reason", staleness.Reason)
-			} else {
-				logger.Info("parquet cache not built - using SQLite engine (run 'msgvault build-cache' for faster aggregates)")
-			}
-			engine = query.NewEngine(s.DB(), false)
-		}
+	readOpts := query.ReadEngineOptions{
+		AnalyticsDir: analyticsDir,
+		IsPostgres:   s.IsPostgreSQL(),
+		Log:          logger,
 	}
+	if !readOpts.IsPostgres {
+		readOpts.CacheStale = cacheNeedsBuild(dbPath, analyticsDir).NeedsBuild
+	}
+	engine := query.OpenReadEngine(s.DB(), dbPath, readOpts)
 	defer func() { _ = engine.Close() }()
 
 	getOAuthMgr := oauthManagerCache()
@@ -189,12 +171,13 @@ func runServe(cmd *cobra.Command, args []string) error {
 	}
 
 	// Register the embed job (cron-driven plus optional post-sync hook).
-	// Only when vector search is enabled and wired.
-	if vf != nil {
+	// Only when vector search is enabled, wired, and has an embed Worker
+	// (the activation gate now counts pending via Backend.Stats, so it is
+	// backend-agnostic — sqlite-vec and doltvec both auto-activate).
+	if vf != nil && vf.Worker != nil {
 		embedJob := &scheduler.EmbedJob{
 			Worker:      vf.Worker,
 			Backend:     vf.Backend,
-			VectorsDB:   vf.VectorsDB,
 			Fingerprint: vf.Cfg.GenerationFingerprint(),
 			Log:         logger,
 		}

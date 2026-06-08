@@ -126,8 +126,37 @@ type Stats struct {
 	StorageBytes   int64
 }
 
-// Backend is the minimum contract a vector store must implement.
-type Backend interface {
+// The vector store's contract is segmented into three capability roles
+// plus Close, then recomposed as Backend. Each consumer depends on the
+// narrowest role it actually uses, so the dependency graph states what's
+// true and test fakes only implement the methods they exercise:
+//
+//   - scheduler.EmbedJob drives generations through their lifecycle  → GenerationLifecycle
+//   - embed.Worker writes embeddings as it drains the queue          → EmbeddingWriter
+//   - hybrid.Engine / mcp read the active index                      → Searcher
+//
+// This mirrors the optional-capability pattern already used for
+// store.VersionController and store.FTSIndexer. Concrete backends
+// (sqlitevec, doltvec) implement the full Backend; only the consumers
+// narrow. FusingBackend remains the additional opt-in capability for
+// server-side fusion (discovered by type assertion off a Searcher).
+
+// GenerationReader is the read-only generation-state surface shared by
+// the lifecycle and search roles. ResolveActiveForFingerprint and
+// CollectStats depend on this alone.
+type GenerationReader interface {
+	// ActiveGeneration returns the current active generation, or
+	// ErrNoActiveGeneration if none exists.
+	ActiveGeneration(ctx context.Context) (Generation, error)
+	BuildingGeneration(ctx context.Context) (*Generation, error)
+}
+
+// GenerationLifecycle is the generation-management role: create, drive to
+// active, retire, and inspect generations. It is what scheduler.EmbedJob
+// depends on (it never reads vectors or writes embeddings itself).
+type GenerationLifecycle interface {
+	GenerationReader
+
 	// CreateGeneration starts (or resumes) a building generation.
 	// fingerprint is stored verbatim on the row; pass
 	// Config.GenerationFingerprint() so a later config change (model,
@@ -137,16 +166,6 @@ type Backend interface {
 	CreateGeneration(ctx context.Context, model string, dimension int, fingerprint string) (GenerationID, error)
 	ActivateGeneration(ctx context.Context, gen GenerationID) error
 	RetireGeneration(ctx context.Context, gen GenerationID) error
-
-	// ActiveGeneration returns the current active generation, or
-	// ErrNoActiveGeneration if none exists.
-	ActiveGeneration(ctx context.Context) (Generation, error)
-	BuildingGeneration(ctx context.Context) (*Generation, error)
-
-	Upsert(ctx context.Context, gen GenerationID, chunks []Chunk) error
-	Search(ctx context.Context, gen GenerationID, queryVec []float32, k int, filter Filter) ([]Hit, error)
-	Delete(ctx context.Context, gen GenerationID, messageIDs []int64) error
-	Stats(ctx context.Context, gen GenerationID) (Stats, error)
 
 	// EnsureSeeded guarantees that the building generation gen has had
 	// its initial pending_embeddings seed pass committed. If a prior
@@ -160,11 +179,39 @@ type Backend interface {
 	// `building` state.
 	EnsureSeeded(ctx context.Context, gen GenerationID) error
 
+	Stats(ctx context.Context, gen GenerationID) (Stats, error)
+}
+
+// EmbeddingWriter is the data-plane write role: persist or remove embeddings
+// for a generation. It is what embed.Worker depends on.
+type EmbeddingWriter interface {
+	Upsert(ctx context.Context, gen GenerationID, chunks []Chunk) error
+	Delete(ctx context.Context, gen GenerationID, messageIDs []int64) error
+}
+
+// Searcher is the read role: resolve the active generation and query it.
+// hybrid.Engine depends on this for ModeVector; ModeHybrid additionally
+// requires the FusingBackend capability (asserted off the Searcher).
+type Searcher interface {
+	GenerationReader
+
+	Search(ctx context.Context, gen GenerationID, queryVec []float32, k int, filter Filter) ([]Hit, error)
+
 	// LoadVector returns the embedding for a specific message in the
 	// active generation. Returns ErrNoActiveGeneration if none exists, or
 	// a descriptive error if the message isn't embedded in the active
 	// generation.
 	LoadVector(ctx context.Context, messageID int64) ([]float32, error)
+}
+
+// Backend is the full contract a vector store implements — the
+// composition of all three roles plus Close, used for construction and
+// wiring. Consumers should depend on the narrow role they use, not on
+// Backend.
+type Backend interface {
+	GenerationLifecycle
+	EmbeddingWriter
+	Searcher
 
 	Close() error
 }

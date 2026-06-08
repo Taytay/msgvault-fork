@@ -169,9 +169,9 @@ func (s *Store) RemoveSourceSerialized(
 	}
 	hadActiveSync = count > 0
 
-	if s.fts5Available {
+	if idx, ok := s.ftsIndexer(); ok && s.fts5Available {
 		if _, err := conn.ExecContext(
-			ctx, s.dialect.FTSDeleteSQL(), sourceID,
+			ctx, idx.FTSDeleteSQL(), sourceID,
 		); err != nil {
 			return hadActiveSync, fmt.Errorf("delete FTS rows: %w", err)
 		}
@@ -201,8 +201,8 @@ func (s *Store) RemoveSourceSerialized(
 // removeSourceExec performs the FTS + sources DELETE on a generic executor
 // (either a *loggedTx or *sql.Conn under a manual transaction).
 func (s *Store) removeSourceExec(tx *loggedTx, sourceID int64) error {
-	if s.fts5Available {
-		if _, err := tx.Exec(s.dialect.FTSDeleteSQL(), sourceID); err != nil {
+	if idx, ok := s.ftsIndexer(); ok && s.fts5Available {
+		if _, err := tx.Exec(idx.FTSDeleteSQL(), sourceID); err != nil {
 			return fmt.Errorf("delete FTS rows: %w", err)
 		}
 	}

@@ -73,6 +73,9 @@ Use --full-rebuild to recreate all cache files from scratch.`,
 		if store.IsPostgresURL(dbPath) {
 			return errors.New("build-cache is SQLite-only; PostgreSQL backends do not use the Parquet analytics cache")
 		}
+		if store.IsMySQLURL(dbPath) {
+			return errors.New("build-cache cannot read the Dolt backend directly; run 'msgvault project' to rebuild the local SQLite replica and its Parquet cache from Dolt")
+		}
 
 		// Check database exists
 		if _, err := os.Stat(dbPath); os.IsNotExist(err) {

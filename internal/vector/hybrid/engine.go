@@ -62,15 +62,20 @@ type Config struct {
 // Engine orchestrates the generation check, query embedding, and fusion
 // call for vector/hybrid search requests.
 type Engine struct {
-	backend vector.Backend
+	// backend is the read surface (vector.Searcher). ModeHybrid
+	// additionally requires the optional vector.FusingBackend
+	// capability, discovered by type assertion in Search.
+	backend vector.Searcher
 	mainDB  *sql.DB
 	client  EmbeddingClient
 	cfg     Config
 }
 
 // NewEngine wires a backend, main DB handle, embedding client, and
-// configuration into an Engine.
-func NewEngine(backend vector.Backend, mainDB *sql.DB, client EmbeddingClient, cfg Config) *Engine {
+// configuration into an Engine. backend is taken as a vector.Searcher
+// (the read role); fused hybrid search is gated on it also satisfying
+// vector.FusingBackend.
+func NewEngine(backend vector.Searcher, mainDB *sql.DB, client EmbeddingClient, cfg Config) *Engine {
 	return &Engine{backend: backend, mainDB: mainDB, client: client, cfg: cfg}
 }
 
@@ -140,10 +145,15 @@ func (e *Engine) Search(ctx context.Context, req SearchRequest) ([]vector.FusedH
 		}, nil
 	}
 
-	// ModeHybrid: prefer FusingBackend.
+	// ModeHybrid requires the FusingBackend capability (server-side
+	// BM25+ANN+RRF in one query). Both production backends (sqlitevec,
+	// doltvec) implement it; this gate is the capability check, not a
+	// stub. A Searcher that fuses only in Go would need a separate
+	// Go-side RRF path — deliberately not built, since no such backend
+	// ships. Callers wanting keyword-only or vector-only use ModeVector.
 	fb, ok := e.backend.(vector.FusingBackend)
 	if !ok {
-		return nil, ResultMeta{}, errors.New("hybrid mode requires a FusingBackend; non-fusing fallback not wired in MVP")
+		return nil, ResultMeta{}, errors.New("hybrid mode requires a backend implementing vector.FusingBackend")
 	}
 	fReq := vector.FusedRequest{
 		FTSQuery:     firstNonEmpty(req.FTSQuery, req.FreeText),

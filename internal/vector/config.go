@@ -42,8 +42,8 @@ const embedPolicyVersion = 1
 // [vector] TOML table.
 type Config struct {
 	Enabled    bool             `toml:"enabled"`
-	Backend    string           `toml:"backend"` // "sqlite-vec" (MVP); "lance" reserved
-	DBPath     string           `toml:"db_path"` // backend-specific
+	Backend    string           `toml:"backend"` // "sqlite-vec" (default), "dolt", or "auto"
+	DBPath     string           `toml:"db_path"` // backend-specific (sqlite-vec only)
 	Embeddings EmbeddingsConfig `toml:"embeddings"`
 	Preprocess PreprocessConfig `toml:"preprocess"`
 	Search     SearchConfig     `toml:"search"`
@@ -249,8 +249,13 @@ func (c *Config) GenerationFingerprint() string {
 // Validate returns a descriptive error if the config is unusable.
 // Only called when Enabled is true; disabled configs are not checked.
 func (c *Config) Validate() error {
-	if c.Backend != "sqlite-vec" {
-		return fmt.Errorf("vector.backend: unknown backend %q (only \"sqlite-vec\" is supported in MVP)", c.Backend)
+	switch c.Backend {
+	case "sqlite-vec", "dolt", "auto":
+		// sqlite-vec: separate vectors.db (sqlite-vec extension).
+		// dolt: vectors co-located in the Dolt system of record (doltvec).
+		// auto: pick by the store backend (Dolt -> dolt, else sqlite-vec).
+	default:
+		return fmt.Errorf("vector.backend: unknown backend %q (supported: \"sqlite-vec\", \"dolt\", \"auto\")", c.Backend)
 	}
 	if c.Embeddings.Endpoint == "" {
 		return errors.New("vector.embeddings.endpoint: required")

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,7 +19,7 @@ import (
 	"github.com/mattn/go-sqlite3"
 )
 
-//go:embed schema.sql schema_sqlite.sql schema_pg.sql
+//go:embed schema.sql schema_sqlite.sql schema_pg.sql schema_mysql.sql
 var schemaFS embed.FS
 
 // Store provides database operations for msgvault.
@@ -71,6 +72,55 @@ func IsPostgresURL(dbPath string) bool {
 	return strings.HasPrefix(dbPath, "postgresql://") || strings.HasPrefix(dbPath, "postgres://")
 }
 
+// IsMySQLURL returns true if the path looks like a MySQL / Dolt connection URL.
+// Dolt speaks the MySQL wire protocol, so both schemes route to the MySQL
+// backend. Exported alongside IsPostgresURL so cmd-side helpers can skip
+// file-only code paths (Parquet cache, backup VACUUM INTO) for server backends.
+func IsMySQLURL(dbPath string) bool {
+	return strings.HasPrefix(dbPath, "mysql://") || strings.HasPrefix(dbPath, "dolt://")
+}
+
+// IsServerURL reports whether the path is any non-file (client/server) DSN.
+func IsServerURL(dbPath string) bool {
+	return IsPostgresURL(dbPath) || IsMySQLURL(dbPath)
+}
+
+// mysqlDSNFromURL converts a mysql:// or dolt:// URL into the DSN form the
+// go-sql-driver/mysql driver expects (user:pass@tcp(host:port)/db?params).
+// parseTime is forced on so DATETIME columns scan into time.Time, and
+// multiStatements on so the multi-statement schema file executes in one Exec.
+func mysqlDSNFromURL(dbURL string) (string, error) {
+	u, err := url.Parse(dbURL)
+	if err != nil {
+		return "", fmt.Errorf("parse MySQL/Dolt URL: %w", err)
+	}
+	host := u.Host
+	if host == "" {
+		host = "127.0.0.1:3306"
+	} else if !strings.Contains(host, ":") {
+		host += ":3306"
+	}
+	dbName := strings.TrimPrefix(u.Path, "/")
+
+	var userInfo string
+	if u.User != nil {
+		if pass, ok := u.User.Password(); ok {
+			userInfo = u.User.Username() + ":" + pass + "@"
+		} else {
+			userInfo = u.User.Username() + "@"
+		}
+	}
+
+	q := u.Query()
+	q.Set("parseTime", "true")
+	q.Set("multiStatements", "true")
+	if q.Get("loc") == "" {
+		q.Set("loc", "UTC")
+	}
+
+	return fmt.Sprintf("%stcp(%s)/%s?%s", userInfo, host, dbName, q.Encode()), nil
+}
+
 // testSQLiteParams configures SQLite for ephemeral test databases: WAL mode
 // for concurrency parity with production, but synchronous=OFF (no fsync per
 // commit). Test DBs live in t.TempDir() and are discarded at test exit, so
@@ -86,6 +136,9 @@ func Open(dbPath string) (*Store, error) {
 	if IsPostgresURL(dbPath) {
 		return openPostgres(dbPath)
 	}
+	if IsMySQLURL(dbPath) {
+		return openDolt(dbPath)
+	}
 	return openSQLite(dbPath, defaultSQLiteParams)
 }
 
@@ -98,6 +151,9 @@ func Open(dbPath string) (*Store, error) {
 func OpenForTest(dbPath string) (*Store, error) {
 	if IsPostgresURL(dbPath) {
 		return openPostgres(dbPath)
+	}
+	if IsMySQLURL(dbPath) {
+		return openDolt(dbPath)
 	}
 	return openSQLite(dbPath, testSQLiteParams)
 }
@@ -181,6 +237,49 @@ func openPostgres(dbURL string) (*Store, error) {
 	}, nil
 }
 
+// openDolt opens a Dolt (MySQL-wire-protocol) database using the given
+// mysql:// or dolt:// connection URL. Dolt is the versioned, remotely-syncable
+// system of record; see docs/research/msgvault-dolt-architecture-plan.md.
+func openDolt(dbURL string) (*Store, error) {
+	dsn, err := mysqlDSNFromURL(dbURL)
+	if err != nil {
+		return nil, err
+	}
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open Dolt/MySQL: %w", err)
+	}
+
+	if err := db.PingContext(context.Background()); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("ping Dolt/MySQL: %w", err)
+	}
+
+	// Dolt's sql-server handles concurrency server-side — use a pool sized
+	// like the PostgreSQL path rather than SQLite's single-writer model.
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(5 * time.Minute)
+
+	dialect := &MySQLDialect{}
+	if err := dialect.InitConn(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("init Dolt/MySQL connection: %w", err)
+	}
+
+	// Every package-internal statement flows through loggedDB's rewrite hook.
+	// For Dolt that means: translate canonical ON CONFLICT upserts to MySQL
+	// syntax, then apply the (no-op) placeholder rebind. This keeps the ~12
+	// inline upsert call sites backend-agnostic.
+	rewrite := func(q string) string { return dialect.Rebind(dialect.RewriteUpsert(q)) }
+
+	return &Store{
+		db:      newLoggedDB(db, rewrite),
+		dbPath:  dbURL,
+		dialect: dialect,
+	}, nil
+}
+
 // OpenReadOnly opens an existing database in read-only mode. Suitable for
 // query-only workloads (MCP server) where multiple processes access the
 // same database concurrently. Does not create the database, run migrations,
@@ -188,6 +287,18 @@ func openPostgres(dbURL string) (*Store, error) {
 func OpenReadOnly(dbPath string) (*Store, error) {
 	if IsPostgresURL(dbPath) {
 		return openPostgresReadOnly(dbPath)
+	}
+	if IsMySQLURL(dbPath) {
+		// Dolt has no per-connection read-only enforcement: it accepts
+		// transaction_read_only but does not block writes on it, and
+		// @@read_only is global (would freeze the whole server, not this
+		// handle). Rather than hand back a store that is "read-only" in name
+		// only, fail loudly. Under the Dolt architecture, read-only consumers
+		// (MCP, query CLI) run against the local SQLite replica, not Dolt.
+		return nil, fmt.Errorf(
+			"read-only mode is not supported on the Dolt backend " +
+				"(Dolt does not enforce per-connection read-only); " +
+				"point read-only consumers at the local SQLite replica instead")
 	}
 
 	if _, err := os.Stat(dbPath); err != nil {
@@ -346,6 +457,14 @@ func (s *Store) DB() *sql.DB {
 func (s *Store) IsPostgreSQL() bool {
 	return s.dialect.DriverName() == "pgx"
 }
+
+// IsMySQL reports whether this store is backed by MySQL/Dolt.
+func (s *Store) IsMySQL() bool {
+	return s.dialect.DriverName() == "mysql"
+}
+
+// isMySQL is the unexported form used by intra-package backend gating.
+func (s *Store) isMySQL() bool { return s.dialect.DriverName() == "mysql" }
 
 // WithExclusiveLock executes fn while holding an exclusive write lock on the
 // database. In WAL mode this blocks concurrent writers (e.g. StartSync) while
@@ -584,15 +703,22 @@ func (s *Store) InitSchema() error {
 	// attachment rows from the old SELECT-then-INSERT UpsertAttachment.
 	// Dedupe before creating the partial unique index that enforces
 	// idempotency going forward. Both steps are idempotent.
-	if err := s.dedupeAttachmentsBeforeUniqueIndex(); err != nil {
-		return fmt.Errorf("dedupe attachments: %w", err)
-	}
-	if _, err := s.db.Exec(`
-		CREATE UNIQUE INDEX IF NOT EXISTS idx_attachments_msg_content_hash
-		    ON attachments(message_id, content_hash)
-		    WHERE content_hash IS NOT NULL AND content_hash != ''
-	`); err != nil {
-		return fmt.Errorf("create idx_attachments_msg_content_hash: %w", err)
+	//
+	// Skipped on MySQL/Dolt: the partial-index predicate
+	// (WHERE content_hash IS NOT NULL AND content_hash != '') is not
+	// expressible in MySQL, and schema_mysql.sql declares the equivalent
+	// index inline, so there is no separate CREATE INDEX to run here.
+	if !s.isMySQL() {
+		if err := s.dedupeAttachmentsBeforeUniqueIndex(); err != nil {
+			return fmt.Errorf("dedupe attachments: %w", err)
+		}
+		if _, err := s.db.Exec(`
+			CREATE UNIQUE INDEX IF NOT EXISTS idx_attachments_msg_content_hash
+			    ON attachments(message_id, content_hash)
+			    WHERE content_hash IS NOT NULL AND content_hash != ''
+		`); err != nil {
+			return fmt.Errorf("create idx_attachments_msg_content_hash: %w", err)
+		}
 	}
 
 	// Legacy databases may have idx_participants_phone as a non-unique
@@ -603,8 +729,15 @@ func (s *Store) InitSchema() error {
 	// matching unique constraint on upgraded DBs. Run a one-shot
 	// migration that dedupes phone rows, drops the index, and
 	// recreates it as UNIQUE.
-	if err := s.ensureParticipantsPhoneUniqueIndex(); err != nil {
-		return fmt.Errorf("ensure idx_participants_phone unique: %w", err)
+	// Skipped on MySQL/Dolt: schema_mysql.sql already declares
+	// idx_participants_phone as a plain UNIQUE key (MySQL UNIQUE indexes
+	// permit multiple NULLs, matching the PG/SQLite partial-index intent),
+	// and the upgrade path that drops/recreates a legacy non-unique index
+	// uses SQLite/PG-specific DDL.
+	if !s.isMySQL() {
+		if err := s.ensureParticipantsPhoneUniqueIndex(); err != nil {
+			return fmt.Errorf("ensure idx_participants_phone unique: %w", err)
+		}
 	}
 
 	// Migrations: add columns for databases created before these features.
@@ -618,25 +751,29 @@ func (s *Store) InitSchema() error {
 		}
 	}
 
-	// Load the optional FTS schema, if the dialect keeps one separate.
-	// PostgreSQL returns "" here because its tsvector lives in the main schema.
-	if ftsFile := s.dialect.SchemaFTS(); ftsFile != "" {
-		ftsSchema, err := schemaFS.ReadFile(ftsFile)
-		if err != nil {
-			return fmt.Errorf("read %s: %w", ftsFile, err)
-		}
-		if _, err := s.db.Exec(string(ftsSchema)); err != nil {
-			if !s.dialect.IsNoSuchModuleError(err) {
-				return fmt.Errorf("init FTS schema: %w", err)
+	// Full-text search is an optional capability (SQLite FTS5 / PG tsvector).
+	// Backends without it (MySQL/Dolt) leave fts5Available false and skip the
+	// FTS code paths entirely — keyword search runs on the local replica.
+	if idx, ok := s.ftsIndexer(); ok {
+		// Load the optional FTS schema, if the dialect keeps one separate.
+		// PostgreSQL returns "" here because its tsvector lives in the main schema.
+		if ftsFile := idx.SchemaFTS(); ftsFile != "" {
+			ftsSchema, err := schemaFS.ReadFile(ftsFile)
+			if err != nil {
+				return fmt.Errorf("read %s: %w", ftsFile, err)
 			}
-			// Module not compiled in; availability stays false. Fall
-			// through so the rest of schema init still runs.
+			if _, err := s.db.Exec(string(ftsSchema)); err != nil {
+				if !s.dialect.IsNoSuchModuleError(err) {
+					return fmt.Errorf("init FTS schema: %w", err)
+				}
+				// Module not compiled in; availability stays false. Fall
+				// through so the rest of schema init still runs.
+			}
 		}
+		// Probe availability through the capability so it works uniformly for
+		// backends that carry FTS inside their main schema.
+		s.fts5Available = idx.FTSAvailable(s.db.DB)
 	}
-
-	// Probe availability through the dialect so it works uniformly for
-	// backends that carry FTS inside their main schema.
-	s.fts5Available = s.dialect.FTSAvailable(s.db.DB)
 
 	// Ensure the default "All" collection exists and contains every source.
 	if err := s.EnsureDefaultCollection(); err != nil {
@@ -669,7 +806,11 @@ func (s *Store) NeedsFTSBackfill() bool {
 	if !s.fts5Available {
 		return false
 	}
-	return s.dialect.FTSNeedsBackfill(s.db.DB)
+	idx, ok := s.ftsIndexer()
+	if !ok {
+		return false
+	}
+	return idx.FTSNeedsBackfill(s.db.DB)
 }
 
 // Stats holds database statistics.

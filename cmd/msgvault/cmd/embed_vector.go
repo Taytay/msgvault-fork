@@ -22,6 +22,12 @@ func runEmbed(cmd *cobra.Command) error {
 	ctx := cmd.Context()
 	out := cmd.OutOrStdout()
 	errOut := cmd.ErrOrStderr()
+	if store.IsMySQLURL(cfg.DatabaseDSN()) {
+		return errors.New(
+			"embeddings build is not yet supported on the Dolt backend: the embed " +
+				"worker is sqlite-vec-specific (a Dolt-aware worker is pending). The " +
+				"doltvec search backend is populated out-of-band via doltvec.Upsert")
+	}
 	s, err := store.Open(cfg.DatabaseDSN())
 	if err != nil {
 		return fmt.Errorf("open main db: %w", err)
