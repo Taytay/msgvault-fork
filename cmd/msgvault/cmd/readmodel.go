@@ -10,32 +10,26 @@ import (
 )
 
 // refreshReadModel brings a backend's derived read structures up to date after
-// a write. Every backend materializes its read side differently, so the
-// operation dispatches on capability and callers (sync, import, the daemon)
-// simply ask "I'm done writing — make the read model current" without knowing
-// which backend they're on:
+// a write. Callers (sync, import, the daemon) simply ask "I'm done writing —
+// make the read model current" without knowing which backend they're on:
 //
 //   - local SQLite (AnalyticsCache): refresh the Parquet analytics cache in
 //     place from the database file.
-//   - versioned system of record (VersionController, e.g. Dolt): project the
-//     SOR into the local SQLite read-replica (tables + FTS) and rebuild the
-//     analytics cache from it.
-//   - queried directly (PostgreSQL): nothing is derived; no-op.
+//   - backends queried directly (PostgreSQL, Dolt): nothing is derived, so this
+//     is a no-op — their analytics/list queries run straight against the system
+//     of record via the dialect query engine (see query.NewEngineForStore).
 //
 // This is the single place that knows the per-backend strategy; the mapping is
 // expressed over capabilities rather than backend types.
-func refreshReadModel(ctx context.Context, s *store.Store) error {
-	if cache, ok := s.AnalyticsCache(); ok {
-		analyticsDir := cfg.AnalyticsDir()
-		fullRebuild := cacheNeedsBuild(s, analyticsDir).FullRebuild
-		_, err := buildCache(cache.SourcePath(), analyticsDir, fullRebuild)
-		return err
+func refreshReadModel(_ context.Context, s *store.Store) error {
+	cache, ok := s.AnalyticsCache()
+	if !ok {
+		return nil
 	}
-	if _, ok := s.VersionController(); ok {
-		_, _, err := projectReplica(ctx, s, cfg.ReplicaPath(), cfg.AnalyticsDir())
-		return err
-	}
-	return nil
+	analyticsDir := cfg.AnalyticsDir()
+	fullRebuild := cacheNeedsBuild(s, analyticsDir).FullRebuild
+	_, err := buildCache(cache.SourcePath(), analyticsDir, fullRebuild)
+	return err
 }
 
 // refreshReadModelAfterWrite opens the store at dbPath and refreshes its read
@@ -56,9 +50,9 @@ func refreshReadModelAfterWrite(dbPath string) {
 }
 
 // projectReplica rebuilds the local SQLite read-replica from a versioned source
-// store, then rebuilds the analytics cache from that replica. Shared by the
-// `project` command and refreshReadModel so the projection steps live in one
-// place.
+// store, then rebuilds the analytics cache from that replica. Used only by the
+// optional `project` command — the normal read path queries Dolt directly, so
+// this is not part of refreshReadModel.
 func projectReplica(ctx context.Context, src *store.Store, replicaPath, analyticsDir string) (*projection.Report, *buildResult, error) {
 	// Fresh replica: remove any prior file so the rebuild is authoritative.
 	for _, suffix := range []string{"", "-wal", "-shm"} {

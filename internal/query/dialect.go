@@ -213,3 +213,48 @@ func (PostgreSQLQueryDialect) SanitizeFTSQuery(query string) string {
 	}
 	return strings.Join(parts, " & ")
 }
+
+// MySQLQueryDialect implements Dialect for MySQL/Dolt. Reads run directly
+// against the system of record (mirroring PostgreSQL) — there is no SQLite
+// replica or Parquet cache to maintain.
+type MySQLQueryDialect struct{}
+
+// Rebind is a no-op: MySQL uses ? placeholders natively, like SQLite.
+func (MySQLQueryDialect) Rebind(query string) string { return query }
+
+// BoolTrueExpr: MySQL/Dolt store booleans as TINYINT(1) 0/1, so compare to 1
+// (same as SQLite, unlike PostgreSQL's native BOOLEAN).
+func (MySQLQueryDialect) BoolTrueExpr(col string) string { return col + " = 1" }
+
+func (MySQLQueryDialect) TimeTruncExpression(column string, granularity string) string {
+	switch granularity {
+	case "year":
+		return fmt.Sprintf("DATE_FORMAT(%s, '%%Y')", column)
+	case "month":
+		return fmt.Sprintf("DATE_FORMAT(%s, '%%Y-%%m')", column)
+	case "day":
+		return fmt.Sprintf("DATE_FORMAT(%s, '%%Y-%%m-%%d')", column)
+	default:
+		return fmt.Sprintf("DATE_FORMAT(%s, '%%Y-%%m')", column)
+	}
+}
+
+// Full-text search: Dolt's base schema carries no FTS index — schema_mysql.sql
+// ships no search column, and the doltvec backend adds a runtime
+// FULLTEXT(subject, snippet) only when vector search is configured, serving
+// keyword/semantic search itself. The aggregate/list query engine therefore
+// reports "no FTS table" so free-text terms degrade to a portable LIKE scan on
+// subject/snippet (see SQLiteEngine.buildSearchQueryParts). HasFTSTableSQL
+// returns a constant 0; the other FTS hooks are never reached on that path but
+// return inert values for safety.
+func (MySQLQueryDialect) HasFTSTableSQL() string { return "SELECT 0" }
+
+func (MySQLQueryDialect) FTSSearchExpression() string { return "FALSE" }
+
+func (MySQLQueryDialect) FTSJoin() string { return "" }
+
+func (MySQLQueryDialect) BuildFTSTerm(terms []string) (expr string, arg string) {
+	return "FALSE", ""
+}
+
+func (MySQLQueryDialect) SanitizeFTSQuery(query string) string { return "" }

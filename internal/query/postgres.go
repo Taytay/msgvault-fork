@@ -43,16 +43,36 @@ func NewPostgreSQLEngine(db *sql.DB) Engine {
 	return &pgEngine{Engine: NewEngineWithDialect(db, PostgreSQLQueryDialect{})}
 }
 
+// doltEngine wraps a dialect-parameterized engine for Dolt (MySQL wire
+// protocol). Like pgEngine it embeds the Engine interface — not *SQLiteEngine —
+// so the SQLite-only TextEngine methods (FTS5 MATCH + strftime) are not
+// promoted; keyword/semantic search on Dolt is served by the doltvec backend,
+// and a type assertion to query.TextEngine cleanly fails here.
+type doltEngine struct {
+	Engine
+}
+
+// NewDoltEngine creates a query engine backed by Dolt. It uses
+// MySQLQueryDialect (? placeholders, DATE_FORMAT time truncation, LIKE-based
+// free-text fallback) so aggregates, listing, and stats run directly against
+// the Dolt system of record — no SQLite replica or Parquet cache, mirroring how
+// PostgreSQL is served.
+func NewDoltEngine(db *sql.DB) Engine {
+	return &doltEngine{Engine: NewEngineWithDialect(db, MySQLQueryDialect{})}
+}
+
 // NewEngineForStore builds the direct query engine for a Store, selecting the
 // SQL dialect from the store's backend. This is the single place engine
 // selection consults backend identity; callers ask the store for an engine
 // rather than re-deriving the dialect (or threading a backend boolean) at each
 // call site. The return type is the Engine interface so the SQLite-only
-// TextEngine is hidden on the PostgreSQL path.
+// TextEngine is hidden on the PostgreSQL and Dolt paths.
 func NewEngineForStore(s *store.Store) Engine {
 	switch s.Backend() {
 	case store.BackendPostgreSQL:
 		return NewPostgreSQLEngine(s.DB())
+	case store.BackendDolt:
+		return NewDoltEngine(s.DB())
 	default:
 		return NewSQLiteEngine(s.DB())
 	}

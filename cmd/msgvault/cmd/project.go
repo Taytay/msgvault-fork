@@ -9,25 +9,26 @@ import (
 	"go.kenn.io/msgvault/internal/store"
 )
 
-// projectCmd rebuilds the local SQLite read-replica and its Parquet analytics
-// cache from the Dolt system of record. Under the Dolt backend, Dolt is the
-// durable/versioned/syncable store while reads (list, search, analytics) run
-// against the local replica; this command refreshes that replica.
+// projectCmd exports the Dolt system of record into a local SQLite + Parquet
+// replica. This is OPTIONAL: msgvault queries Dolt directly for reads, search,
+// and analytics (see query.NewDoltEngine), so the replica is only useful as an
+// offline SQLite snapshot or to get the DuckDB/Parquet aggregate speedup on
+// very large archives. It is no longer required after a sync.
 var projectCmd = &cobra.Command{
 	Use:   "project",
-	Short: "Rebuild the local read-replica (SQLite + Parquet) from the Dolt system of record",
-	Long: `Rebuild the local read-replica from the Dolt backing store.
+	Short: "Export the Dolt system of record to a local SQLite + Parquet replica (optional)",
+	Long: `Export the Dolt backing store to a local SQLite + Parquet replica.
 
-When [data].database_url points at a Dolt/MySQL backend, Dolt is the system of
-record but the fast read/search/analytics stack runs against a local SQLite
-replica. This command:
+This is OPTIONAL. When [data].database_url points at a Dolt/MySQL backend,
+msgvault reads, searches, and aggregates directly against Dolt — no replica is
+needed for normal use. Run this only to produce an offline SQLite snapshot, or
+to get the DuckDB/Parquet aggregate speedup on a very large archive. It:
 
   1. copies every table Dolt -> local SQLite replica (<data_dir>/replica.db),
   2. backfills the SQLite FTS5 keyword-search index, and
   3. rebuilds the Parquet analytics cache from the replica.
 
-Run it after syncing new mail into Dolt (or after 'dolt pull' on another
-machine). Rebuild embeddings separately with 'msgvault embeddings build'.`,
+Rebuild embeddings separately with 'msgvault embeddings build'.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		dbURL := cfg.DatabaseDSN()
 		replicaPath := cfg.ReplicaPath()
