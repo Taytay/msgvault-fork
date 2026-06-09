@@ -727,11 +727,11 @@ func (s *Store) InitSchema() error {
 	// Dedupe before creating the partial unique index that enforces
 	// idempotency going forward. Both steps are idempotent.
 	//
-	// Skipped on MySQL/Dolt: the partial-index predicate
-	// (WHERE content_hash IS NOT NULL AND content_hash != '') is not
-	// expressible in MySQL, and schema_mysql.sql declares the equivalent
-	// index inline, so there is no separate CREATE INDEX to run here.
-	if !s.isMySQL() {
+	// Gated on the dialect: backends that build partial unique indexes via
+	// app-side migration (SQLite, PostgreSQL) run this; MySQL/Dolt declares the
+	// equivalent index inline in schema_mysql.sql and cannot express the partial
+	// predicate (WHERE content_hash IS NOT NULL AND content_hash != '').
+	if s.dialect.UsesPartialIndexMigrations() {
 		if err := s.dedupeAttachmentsBeforeUniqueIndex(); err != nil {
 			return fmt.Errorf("dedupe attachments: %w", err)
 		}
@@ -752,12 +752,11 @@ func (s *Store) InitSchema() error {
 	// matching unique constraint on upgraded DBs. Run a one-shot
 	// migration that dedupes phone rows, drops the index, and
 	// recreates it as UNIQUE.
-	// Skipped on MySQL/Dolt: schema_mysql.sql already declares
-	// idx_participants_phone as a plain UNIQUE key (MySQL UNIQUE indexes
-	// permit multiple NULLs, matching the PG/SQLite partial-index intent),
-	// and the upgrade path that drops/recreates a legacy non-unique index
-	// uses SQLite/PG-specific DDL.
-	if !s.isMySQL() {
+	// Gated on the same dialect predicate: MySQL/Dolt declares
+	// idx_participants_phone as a plain UNIQUE key inline (MySQL UNIQUE indexes
+	// permit multiple NULLs, matching the PG/SQLite partial-index intent), and
+	// the drop/recreate upgrade path uses SQLite/PG-specific DDL.
+	if s.dialect.UsesPartialIndexMigrations() {
 		if err := s.ensureParticipantsPhoneUniqueIndex(); err != nil {
 			return fmt.Errorf("ensure idx_participants_phone unique: %w", err)
 		}

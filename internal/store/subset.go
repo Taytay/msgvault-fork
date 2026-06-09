@@ -56,7 +56,17 @@ func (e sqliteSubsetExporter) DestinationHint() string {
 }
 
 func (e sqliteSubsetExporter) ExportSubset(_ context.Context, rowCount int, dest string) (*CopyResult, error) {
-	return CopySubset(e.srcPath, dest, rowCount)
+	dir, err := filepath.Abs(dest)
+	if err != nil {
+		return nil, fmt.Errorf("resolve output path: %w", err)
+	}
+	result, err := CopySubset(e.srcPath, dir, rowCount)
+	if err != nil {
+		return nil, err
+	}
+	result.Location = filepath.Join(dir, "msgvault.db")
+	result.UsageHint = fmt.Sprintf("MSGVAULT_HOME=%s msgvault tui", dir)
+	return result, nil
 }
 
 // CopyResult holds the summary of a subset copy operation.
@@ -68,6 +78,12 @@ type CopyResult struct {
 	Sources       int64
 	DBSize        int64
 	Elapsed       time.Duration
+	// Location is a human-readable description of where the subset was written
+	// (a file path for SQLite, a database name for Dolt). UsageHint tells the
+	// user how to open it. Both are set by the exporter so the command need not
+	// know the backend.
+	Location  string
+	UsageHint string
 }
 
 // CopySubset copies rowCount most recent messages (and all referenced

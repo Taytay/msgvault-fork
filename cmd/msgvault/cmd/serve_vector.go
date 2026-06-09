@@ -36,9 +36,10 @@ func setupVectorFeatures(ctx context.Context, s *store.Store) (*vectorFeatures, 
 		return nil, nil //nolint:nilnil // vector disabled: callers nil-check vf; (nil, nil) means "no features, no error"
 	}
 	mainDB := s.DB()
-	if s.Backend() == store.BackendPostgreSQL {
+	native := nativeVectorBackend(s)
+	if native == "" {
 		return nil, fmt.Errorf(
-			"vector features are SQLite-only; set [vector] enabled = false to use msgvault with PostgreSQL (vector support is planned for PR4)")
+			"vector features are not supported on the %s backend; set [vector] enabled = false (PostgreSQL vector support is planned for PR4)", s.Backend())
 	}
 	if err := cfg.Vector.Validate(); err != nil {
 		return nil, fmt.Errorf("vector config: %w", err)
@@ -60,21 +61,20 @@ func setupVectorFeatures(ctx context.Context, s *store.Store) (*vectorFeatures, 
 		SubjectBoost:        cfg.Vector.Search.SubjectBoost,
 	}
 
-	// Resolve the effective backend. "auto" follows the system of record.
+	// Resolve the effective backend: "auto" follows the store's native vector
+	// backend, and an explicit choice must match it.
 	kind := cfg.Vector.Backend
 	if kind == "" || kind == "auto" {
-		if s.Backend() == store.BackendDolt {
-			kind = "dolt"
-		} else {
-			kind = "sqlite-vec"
-		}
+		kind = native
+	}
+	if kind != native {
+		return nil, fmt.Errorf(
+			"vector.backend=%q is not compatible with the %s store (it uses %q); set [vector].backend to \"auto\" or %q",
+			kind, s.Backend(), native, native)
 	}
 
 	// Dolt backend: search served directly from the system of record.
 	if kind == "dolt" {
-		if s.Backend() != store.BackendDolt {
-			return nil, fmt.Errorf("vector.backend=\"dolt\" requires a Dolt (mysql://) store; got the %s backend", s.Backend())
-		}
 		backend, err := doltvec.Open(ctx, doltvec.Options{
 			DB:        mainDB,
 			Dimension: cfg.Vector.Embeddings.Dimension,
@@ -97,10 +97,6 @@ func setupVectorFeatures(ctx context.Context, s *store.Store) (*vectorFeatures, 
 	}
 
 	// SQLite backend: separate vectors.db with the sqlite-vec extension.
-	if s.Backend() == store.BackendDolt {
-		return nil, fmt.Errorf(
-			"vector.backend=\"sqlite-vec\" cannot run against a Dolt store; set [vector].backend = \"dolt\" or \"auto\"")
-	}
 	cache, ok := s.AnalyticsCache()
 	if !ok {
 		return nil, fmt.Errorf("vector.backend=\"sqlite-vec\" requires a local SQLite store")

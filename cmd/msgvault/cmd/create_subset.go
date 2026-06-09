@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -70,25 +69,17 @@ func runCreateSubset(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("create-subset is not supported on the %s backend", s.Backend())
 	}
 
-	// For SQLite, dest is a directory; resolve it to an absolute path so the
-	// "to use" hint is unambiguous. For other backends dest is opaque (e.g. a
-	// Dolt database name) and passed through verbatim.
-	dest := subsetOutput
-	if s.Backend() == store.BackendSQLite {
-		if abs, err := filepath.Abs(subsetOutput); err == nil {
-			dest = abs
-		}
-	}
+	fmt.Fprintf(os.Stderr, "Copying %d messages to %s...\n", subsetRows, exporter.DestinationHint())
 
-	fmt.Fprintf(os.Stderr, "Copying %d messages to %s...\n", subsetRows, dest)
-
-	result, err := exporter.ExportSubset(cmd.Context(), subsetRows, dest)
+	// The exporter interprets the raw --output value (directory for SQLite,
+	// database name for Dolt) and reports where it landed and how to use it.
+	result, err := exporter.ExportSubset(cmd.Context(), subsetRows, subsetOutput)
 	if err != nil {
 		return fmt.Errorf("create subset (destination is %s): %w", exporter.DestinationHint(), err)
 	}
 
 	fmt.Fprintf(os.Stderr,
-		"Created subset (%s)\n", result.Elapsed.Round(time.Millisecond),
+		"Created subset: %s (%s)\n", result.Location, result.Elapsed.Round(time.Millisecond),
 	)
 	fmt.Printf("Sources:       %d\n", result.Sources)
 	fmt.Printf("Messages:      %d\n", result.Messages)
@@ -106,8 +97,8 @@ func runCreateSubset(cmd *cobra.Command, _ []string) error {
 		)
 	}
 
-	if s.Backend() == store.BackendSQLite {
-		fmt.Fprintf(os.Stderr, "\nTo use: MSGVAULT_HOME=%s msgvault tui\n", dest)
+	if result.UsageHint != "" {
+		fmt.Fprintf(os.Stderr, "\nTo use: %s\n", result.UsageHint)
 	}
 
 	return nil

@@ -127,6 +127,8 @@ func (s *Store) exportSubsetDolt(ctx context.Context, rowCount int, dest string)
 		return nil, err
 	}
 	result.Elapsed = time.Since(start)
+	result.Location = fmt.Sprintf("database %q on the Dolt server", dest)
+	result.UsageHint = fmt.Sprintf("set [data].database_url to this server's %q database", dest)
 	return result, nil
 }
 

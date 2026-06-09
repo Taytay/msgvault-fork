@@ -130,6 +130,10 @@ func (d *MySQLDialect) InsertOrIgnoreSuffix() string { return "" }
 // keeps schema_pg.sql complete).
 func (d *MySQLDialect) LegacyColumnMigrations() []ColumnMigration { return nil }
 
+// UsesPartialIndexMigrations is false: MySQL/Dolt declares the equivalent
+// UNIQUE keys inline in schema_mysql.sql and cannot express partial indexes.
+func (d *MySQLDialect) UsesPartialIndexMigrations() bool { return false }
+
 // DatabaseSize sums data + index length for the current schema.
 func (d *MySQLDialect) DatabaseSize(db *sql.DB, _ string) (int64, error) {
 	var size sql.NullInt64

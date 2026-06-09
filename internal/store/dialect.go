@@ -74,6 +74,14 @@ type Dialect interface {
 	// already present in schema.sql / schema_pg.sql.
 	LegacyColumnMigrations() []ColumnMigration
 
+	// UsesPartialIndexMigrations reports whether InitSchema should run the
+	// app-side partial-unique-index migrations (attachments dedup, phone
+	// uniqueness). True for SQLite and PostgreSQL, whose partial indexes are
+	// built up by those migrations. False for MySQL/Dolt, which cannot express
+	// the partial predicate and declares the equivalent UNIQUE keys inline in
+	// schema_mysql.sql — so the decision lives in the dialect, not InitSchema.
+	UsesPartialIndexMigrations() bool
+
 	// DatabaseSize returns the on-disk or logical size of the database in
 	// bytes. For SQLite: file size at dbPath. For PostgreSQL: queries
 	// pg_database_size(). Returns 0 if the size cannot be determined;

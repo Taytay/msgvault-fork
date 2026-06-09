@@ -73,7 +73,7 @@ func TestSetupVectorFeatures_Selection(t *testing.T) {
 
 		_, err = setupVectorFeatures(ctx, s)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "requires a Dolt")
+		assert.Contains(t, err.Error(), "not compatible")
 	})
 
 	t.Run("backend=sqlite-vec on a Dolt store errors", func(t *testing.T) {
@@ -90,7 +90,7 @@ func TestSetupVectorFeatures_Selection(t *testing.T) {
 		cfg = vectorTestConfig(t, "sqlite-vec")
 		_, err = setupVectorFeatures(ctx, s)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "cannot run against a Dolt store")
+		assert.Contains(t, err.Error(), "not compatible")
 	})
 
 	t.Run("auto selects doltvec for a Dolt store", func(t *testing.T) {

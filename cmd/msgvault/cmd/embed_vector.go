@@ -27,11 +27,10 @@ func runEmbed(cmd *cobra.Command) error {
 		return fmt.Errorf("open main db: %w", err)
 	}
 	defer func() { _ = s.Close() }()
-	if s.Backend() == store.BackendDolt {
-		return errors.New(
-			"embeddings build is not yet supported on the Dolt backend: the embed " +
-				"worker is sqlite-vec-specific (a Dolt-aware worker is pending). The " +
-				"doltvec search backend is populated out-of-band via doltvec.Upsert")
+	if nativeVectorBackend(s) != "sqlite-vec" {
+		return fmt.Errorf(
+			"the embeddings build worker is sqlite-vec-specific and runs only on a SQLite store; "+
+				"the %s backend builds embeddings through its own path (Dolt via the doltvec worker)", s.Backend())
 	}
 
 	if err := sqlitevec.RegisterExtension(); err != nil {

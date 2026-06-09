@@ -211,6 +211,10 @@ func (d *PostgreSQLDialect) FTSRebuildSchema(db *sql.DB) error {
 //
 //	INTEGER (id ref) → BIGINT, INTEGER (counter) → INTEGER,
 //	TEXT → TEXT, DATETIME → TIMESTAMPTZ, JSON → JSONB.
+// UsesPartialIndexMigrations is true: PostgreSQL builds its partial unique
+// indexes via the app-side InitSchema migrations.
+func (d *PostgreSQLDialect) UsesPartialIndexMigrations() bool { return true }
+
 func (d *PostgreSQLDialect) LegacyColumnMigrations() []ColumnMigration {
 	return []ColumnMigration{
 		{`ALTER TABLE sources ADD COLUMN IF NOT EXISTS sync_config JSONB`, "sync_config"},

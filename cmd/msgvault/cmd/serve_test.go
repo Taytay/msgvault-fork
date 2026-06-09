@@ -149,7 +149,7 @@ func TestSetupVectorFeatures_RefusesPostgres(t *testing.T) {
 
 	_, err = setupVectorFeatures(context.Background(), s)
 	requirepkg.Error(t, err, "setupVectorFeatures with postgres store")
-	assertpkg.ErrorContains(t, err, "SQLite-only")
+	assertpkg.ErrorContains(t, err, "not supported on the PostgreSQL backend")
 }
 
 // TestFindScheduledSyncSource verifies that the scheduler's
