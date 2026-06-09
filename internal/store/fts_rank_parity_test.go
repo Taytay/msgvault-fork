@@ -28,6 +28,9 @@ func currentBackend() string {
 // the residual scorer-math differences documented in PG_STATUS.md.
 func TestFTSRankParityFixture(t *testing.T) {
 	st := testutil.NewTestStore(t)
+	if !st.FTS5Available() {
+		t.Skip("store-level FTS ranking requires the FTSIndexer capability (SQLite/PostgreSQL); Dolt keyword search is served by doltvec, not the store")
+	}
 
 	src, err := st.GetOrCreateSource("gmail", "fixture@example.com")
 	require.NoError(t, err, "GetOrCreateSource")

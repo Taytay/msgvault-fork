@@ -282,9 +282,12 @@ func openDolt(dbURL string) (*Store, error) {
 
 	// Every package-internal statement flows through loggedDB's rewrite hook.
 	// For Dolt that means: translate canonical ON CONFLICT upserts to MySQL
-	// syntax, then apply the (no-op) placeholder rebind. This keeps the ~12
-	// inline upsert call sites backend-agnostic.
-	rewrite := func(q string) string { return dialect.Rebind(dialect.RewriteUpsert(q)) }
+	// syntax and the canonical LIKE ESCAPE '\' clause to MySQL's '\\', then
+	// apply the (no-op) placeholder rebind. This keeps the inline upsert/search
+	// call sites backend-agnostic.
+	rewrite := func(q string) string {
+		return dialect.Rebind(dialect.RewriteLikeEscape(dialect.RewriteUpsert(q)))
+	}
 
 	return &Store{
 		db:      newLoggedDB(db, rewrite),
@@ -504,6 +507,28 @@ func (s *Store) WithExclusiveLock(ctx context.Context, fn func() error) error {
 // the transaction is rolled back; otherwise it is committed. The callback
 // receives *loggedTx so every statement inside the transaction goes through
 // the dialect's Rebind automatically.
+// retryOnConflict runs fn, retrying when the dialect reports a unique-constraint
+// conflict. It exists for Dolt's optimistic transaction model, where concurrent
+// inserts of the same key conflict at COMMIT rather than at INSERT; on retry the
+// winning row is visible and the idempotent upsert (ON CONFLICT DO NOTHING /
+// DO UPDATE) collapses to it. On SQLite and PostgreSQL those upserts never raise
+// a conflict error, so fn runs exactly once and this is a thin pass-through.
+func (s *Store) retryOnConflict(fn func() error) error {
+	const maxAttempts = 25
+	var err error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		err = fn()
+		if err == nil || !s.dialect.IsConflictError(err) {
+			return err
+		}
+		// Back off with per-goroutine jitter so a thundering herd of racers
+		// de-synchronizes instead of colliding on every retry.
+		jitter := time.Duration(time.Now().UnixNano()%5) * time.Millisecond
+		time.Sleep(time.Duration(attempt)*time.Millisecond + jitter)
+	}
+	return err
+}
+
 func (s *Store) withTx(fn func(tx *loggedTx) error) error {
 	start := time.Now()
 	slog.Debug("sql tx begin")
