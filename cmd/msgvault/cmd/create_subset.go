@@ -33,7 +33,7 @@ var (
 func init() {
 	createSubsetCmd.Flags().StringVarP(
 		&subsetOutput, "output", "o", "",
-		"destination directory (msgvault.db created inside)",
+		"destination: an output directory (SQLite) or a new database name (Dolt)",
 	)
 	createSubsetCmd.Flags().IntVar(
 		&subsetRows, "rows", 0,
@@ -53,25 +53,38 @@ func runCreateSubset(cmd *cobra.Command, _ []string) error {
 		return usageErr(cmd, errors.New("--rows must be a positive integer"))
 	}
 
-	srcDBPath := cfg.DatabaseDSN()
-
-	dstDir, err := filepath.Abs(subsetOutput)
-	if err != nil {
-		return fmt.Errorf("resolve output path: %w", err)
-	}
-
-	fmt.Fprintf(os.Stderr,
-		"Copying %d messages from %s...\n", subsetRows, srcDBPath,
-	)
-
-	// CopySubset validates the source itself (it must be a local SQLite file
-	// and must exist); the command stays unaware of backend specifics.
-	result, err := store.CopySubset(srcDBPath, dstDir, subsetRows)
+	// Open the source store and ask it to subset itself. The backend's
+	// SubsetExporter owns how the copy happens and what `dest` means; the
+	// command never branches on backend type.
+	s, err := store.OpenExisting(cfg.DatabaseDSN())
 	if errors.Is(err, store.ErrDatabaseNotFound) {
-		return fmt.Errorf("source database not found: %s\nRun 'msgvault init-db' and sync first", srcDBPath)
+		return fmt.Errorf("source database not found: %s\nRun 'msgvault init-db' and sync first", cfg.DatabaseDSN())
 	}
 	if err != nil {
-		return fmt.Errorf("create subset: %w", err)
+		return fmt.Errorf("open source database: %w", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	exporter, ok := s.SubsetExporter()
+	if !ok {
+		return fmt.Errorf("create-subset is not supported on the %s backend", s.Backend())
+	}
+
+	// For SQLite, dest is a directory; resolve it to an absolute path so the
+	// "to use" hint is unambiguous. For other backends dest is opaque (e.g. a
+	// Dolt database name) and passed through verbatim.
+	dest := subsetOutput
+	if s.Backend() == store.BackendSQLite {
+		if abs, err := filepath.Abs(subsetOutput); err == nil {
+			dest = abs
+		}
+	}
+
+	fmt.Fprintf(os.Stderr, "Copying %d messages to %s...\n", subsetRows, dest)
+
+	result, err := exporter.ExportSubset(cmd.Context(), subsetRows, dest)
+	if err != nil {
+		return fmt.Errorf("create subset (destination is %s): %w", exporter.DestinationHint(), err)
 	}
 
 	fmt.Fprintf(os.Stderr,
@@ -82,7 +95,9 @@ func runCreateSubset(cmd *cobra.Command, _ []string) error {
 	fmt.Printf("Conversations: %d\n", result.Conversations)
 	fmt.Printf("Participants:  %d\n", result.Participants)
 	fmt.Printf("Labels:        %d\n", result.Labels)
-	fmt.Printf("Database size: %s\n", formatSize(result.DBSize))
+	if result.DBSize > 0 {
+		fmt.Printf("Database size: %s\n", formatSize(result.DBSize))
+	}
 
 	if int64(subsetRows) > result.Messages {
 		fmt.Fprintf(os.Stderr,
@@ -91,9 +106,9 @@ func runCreateSubset(cmd *cobra.Command, _ []string) error {
 		)
 	}
 
-	fmt.Fprintf(os.Stderr,
-		"\nTo use: MSGVAULT_HOME=%s msgvault tui\n", dstDir,
-	)
+	if s.Backend() == store.BackendSQLite {
+		fmt.Fprintf(os.Stderr, "\nTo use: MSGVAULT_HOME=%s msgvault tui\n", dest)
+	}
 
 	return nil
 }
