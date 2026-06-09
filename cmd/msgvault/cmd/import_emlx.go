@@ -174,7 +174,7 @@ Examples:
 			importErr = importAutoAccounts(ctx, cmd, st, mailDir, attachmentsDir)
 		}
 
-		rebuildCacheAfterWrite(dbPath)
+		refreshReadModelAfterWrite(dbPath)
 		return importErr
 	},
 }

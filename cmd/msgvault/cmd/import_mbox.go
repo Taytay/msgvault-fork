@@ -355,7 +355,7 @@ Examples:
 		_, _ = fmt.Fprintf(out, "  Errors:         %d\n", totalErrors)
 		_, _ = fmt.Fprintf(out, "  Bytes:          %.2f MB\n", float64(totalBytes)/(1024*1024))
 
-		rebuildCacheAfterWrite(dbPath)
+		refreshReadModelAfterWrite(dbPath)
 
 		if ctx.Err() == nil && hadHardErrors {
 			return fmt.Errorf("import completed with %d errors", totalErrors)

@@ -391,27 +391,11 @@ func runScheduledSync(ctx context.Context, identifier string, s *store.Store, ge
 		"duration", time.Since(startTime),
 	)
 
-	// Rebuild cache if stale (covers new messages and deletions). Only
-	// backends with the analytics-cache capability have a cache to rebuild.
-	cache, ok := s.AnalyticsCache()
-	if !ok {
-		return nil
-	}
-	analyticsDir := cfg.AnalyticsDir()
-	if staleness := cacheNeedsBuild(s, analyticsDir); staleness.NeedsBuild {
-		logger.Info("rebuilding cache after sync",
-			"identifier", identifier, "reason", staleness.Reason,
-			"full_rebuild", staleness.FullRebuild)
-		result, err := buildCache(
-			cache.SourcePath(), analyticsDir, staleness.FullRebuild)
-		if err != nil {
-			logger.Error("cache build failed", "error", err)
-			// Don't fail the sync for cache build errors
-		} else if !result.Skipped {
-			logger.Info("cache build completed",
-				"exported", result.ExportedCount,
-			)
-		}
+	// Refresh whatever derived read model this backend needs (SQLite Parquet
+	// cache, Dolt replica projection, or nothing for direct-query backends).
+	// Don't fail the sync on refresh errors — the data is durable either way.
+	if err := refreshReadModel(ctx, s); err != nil {
+		logger.Error("read-model refresh after sync failed", "identifier", identifier, "error", err)
 	}
 
 	return nil

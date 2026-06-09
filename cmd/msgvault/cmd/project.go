@@ -4,10 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 
 	"github.com/spf13/cobra"
-	"go.kenn.io/msgvault/internal/projection"
 	"go.kenn.io/msgvault/internal/store"
 )
 
@@ -53,39 +51,13 @@ machine). Rebuild embeddings separately with 'msgvault embeddings build'.`,
 					"backends are queried directly and use 'build-cache' instead")
 		}
 
-		// Fresh replica: remove any prior file so the rebuild is authoritative.
-		for _, suffix := range []string{"", "-wal", "-shm"} {
-			if err := os.Remove(replicaPath + suffix); err != nil && !os.IsNotExist(err) {
-				return fmt.Errorf("remove stale replica %s: %w", replicaPath+suffix, err)
-			}
-		}
-		dst, err := store.Open(replicaPath)
-		if err != nil {
-			return fmt.Errorf("open replica: %w", err)
-		}
-		if err := dst.InitSchema(); err != nil {
-			_ = dst.Close()
-			return fmt.Errorf("init replica schema: %w", err)
-		}
-
 		fmt.Printf("Projecting Dolt -> %s ...\n", replicaPath)
-		rep, err := projection.Project(ctx, src, dst)
+		rep, result, err := projectReplica(ctx, src, replicaPath, analyticsDir)
 		if err != nil {
-			_ = dst.Close()
-			return fmt.Errorf("project: %w", err)
-		}
-		// Close the replica before build-cache opens its own DuckDB/SQLite handles.
-		if err := dst.Close(); err != nil {
-			return fmt.Errorf("close replica: %w", err)
+			return err
 		}
 		fmt.Printf("Copied %d messages (%d indexed for search) into the replica.\n",
 			rep.Rows["messages"], rep.FTSIndexed)
-
-		// Rebuild the Parquet analytics cache from the replica (unchanged path).
-		result, err := buildCache(replicaPath, analyticsDir, true)
-		if err != nil {
-			return fmt.Errorf("build analytics cache: %w", err)
-		}
 		fmt.Printf("Built analytics cache (%d messages) in %s\n", result.ExportedCount, result.OutputDir)
 		fmt.Println("\nProjection complete. Rebuild embeddings with 'msgvault embeddings build' if you use semantic search.")
 		return nil

@@ -807,40 +807,6 @@ func exportToCSV(db *sql.DB, query string, dest string) error {
 	return rows.Err()
 }
 
-// rebuildCacheAfterWrite rebuilds the analytics cache after a write
-// operation. Uses the staleness check to determine whether a full
-// rebuild (deletions/mutations) or incremental export (new messages
-// only) is needed. Logs a warning on failure — the data is safe in
-// SQLite. Backends without the analytics-cache capability have no cache
-// to rebuild and return silently.
-func rebuildCacheAfterWrite(dbPath string) {
-	s, err := store.Open(dbPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: cache rebuild skipped (open db: %v)\n", err)
-		return
-	}
-	cache, ok := s.AnalyticsCache()
-	if !ok {
-		_ = s.Close()
-		return
-	}
-	analyticsDir := cfg.AnalyticsDir()
-	fullRebuild := cacheNeedsBuild(s, analyticsDir).FullRebuild
-	_ = s.Close()
-
-	result, err := buildCache(cache.SourcePath(), analyticsDir, fullRebuild)
-	if err != nil {
-		fmt.Fprintf(os.Stderr,
-			"Warning: cache rebuild failed: %v\n", err)
-		fmt.Fprintf(os.Stderr,
-			"Run 'msgvault build-cache' to retry.\n")
-		return
-	}
-	if !result.Skipped {
-		logger.Info("cache rebuilt", "exported", result.ExportedCount)
-	}
-}
-
 func init() {
 	rootCmd.AddCommand(buildCacheCmd)
 	rootCmd.AddCommand(cacheStatsCmd)
