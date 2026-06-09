@@ -19,6 +19,9 @@ func TestMySQLQueryDialect_SQL(t *testing.T) {
 	// Booleans are TINYINT(1); compare to 1 (not the bare column as on PG).
 	assert.Equal(t, "m.has_attachments = 1", d.BoolTrueExpr("m.has_attachments"))
 
+	// LIKE escape: backslash must be doubled in a MySQL string literal.
+	assert.Equal(t, `ESCAPE '\\'`, d.LikeEscape())
+
 	// Time bucketing uses DATE_FORMAT with literal % specifiers.
 	assert.Equal(t, "DATE_FORMAT(m.sent_at, '%Y')", d.TimeTruncExpression("m.sent_at", "year"))
 	assert.Equal(t, "DATE_FORMAT(m.sent_at, '%Y-%m')", d.TimeTruncExpression("m.sent_at", "month"))

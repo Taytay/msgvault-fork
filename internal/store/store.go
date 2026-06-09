@@ -97,6 +97,15 @@ func mysqlDSNFromURL(dbURL string) (string, error) {
 	if q.Get("loc") == "" {
 		q.Set("loc", "UTC")
 	}
+	// The query engine's aggregates are written for the lenient GROUP BY
+	// semantics SQLite and PostgreSQL use (e.g. COUNT(*) OVER() alongside an
+	// aggregated GROUP BY). Dolt defaults to ONLY_FULL_GROUP_BY and rejects
+	// them, so drop that mode while keeping write strictness. go-sql-driver
+	// applies unknown DSN params as SET <var>=<value> on every connection, so
+	// this covers the whole pool. (Honored only if the caller didn't set it.)
+	if q.Get("sql_mode") == "" {
+		q.Set("sql_mode", "'STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION'")
+	}
 
 	return fmt.Sprintf("%stcp(%s)/%s?%s", userInfo, host, dbName, q.Encode()), nil
 }

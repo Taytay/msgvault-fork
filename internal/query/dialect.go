@@ -60,6 +60,13 @@ type Dialect interface {
 	// must emit "col = 1"; PostgreSQL has a real BOOLEAN type and rejects
 	// integer comparisons, so the bare column name is the right form.
 	BoolTrueExpr(col string) string
+
+	// LikeEscape returns the "ESCAPE '<char>'" clause used after a LIKE that
+	// escapes wildcards with backslash. The escape character is always
+	// backslash; only its SQL-literal spelling differs. SQLite and PostgreSQL
+	// read '\' as a literal backslash; MySQL/Dolt process backslash escapes in
+	// string literals, so the backslash must be doubled to '\\'.
+	LikeEscape() string
 }
 
 // SQLiteQueryDialect implements Dialect for SQLite.
@@ -68,6 +75,9 @@ type SQLiteQueryDialect struct{}
 func (SQLiteQueryDialect) Rebind(query string) string { return query }
 
 func (SQLiteQueryDialect) BoolTrueExpr(col string) string { return col + " = 1" }
+
+// LikeEscape: SQLite reads '\' as a literal backslash.
+func (SQLiteQueryDialect) LikeEscape() string { return `ESCAPE '\'` }
 
 func (SQLiteQueryDialect) TimeTruncExpression(column string, granularity string) string {
 	switch granularity {
@@ -137,6 +147,9 @@ func (PostgreSQLQueryDialect) Rebind(query string) string {
 }
 
 func (PostgreSQLQueryDialect) BoolTrueExpr(col string) string { return col }
+
+// LikeEscape: PostgreSQL (standard_conforming_strings on) reads '\' literally.
+func (PostgreSQLQueryDialect) LikeEscape() string { return `ESCAPE '\'` }
 
 func (PostgreSQLQueryDialect) TimeTruncExpression(column string, granularity string) string {
 	switch granularity {
@@ -225,6 +238,10 @@ func (MySQLQueryDialect) Rebind(query string) string { return query }
 // BoolTrueExpr: MySQL/Dolt store booleans as TINYINT(1) 0/1, so compare to 1
 // (same as SQLite, unlike PostgreSQL's native BOOLEAN).
 func (MySQLQueryDialect) BoolTrueExpr(col string) string { return col + " = 1" }
+
+// LikeEscape: MySQL/Dolt process backslash escapes inside string literals, so
+// '\' would parse as an escaped quote — the backslash must be doubled.
+func (MySQLQueryDialect) LikeEscape() string { return `ESCAPE '\\'` }
 
 func (MySQLQueryDialect) TimeTruncExpression(column string, granularity string) string {
 	switch granularity {
