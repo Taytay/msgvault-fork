@@ -82,11 +82,23 @@ func (d *MySQLDialect) RewriteUpsert(query string) string {
 	return reExcludedRef.ReplaceAllString(q, "VALUES($1)")
 }
 
+// RewriteLikeEscape doubles the backslash in a canonical LIKE ... ESCAPE '\'
+// clause. SQLite and PostgreSQL read '\' in a string literal as a single
+// backslash; MySQL/Dolt process backslash escapes, so '\' parses as an escaped
+// quote and the literal must become ESCAPE '\\'. No-op for statements without
+// the clause, so it is safe to run over every statement (like RewriteUpsert).
+func (d *MySQLDialect) RewriteLikeEscape(query string) string {
+	return strings.ReplaceAll(query, `ESCAPE '\'`, `ESCAPE '\\'`)
+}
+
 // Now returns the MySQL expression for the current timestamp.
 func (d *MySQLDialect) Now() string { return "NOW()" }
 
 // BoolTrueExpr compares against 1 — MySQL stores BOOLEAN as TINYINT(1).
 func (d *MySQLDialect) BoolTrueExpr(col string) string { return col + " = 1" }
+
+// RandomFunc returns MySQL/Dolt's random function (RAND(), not RANDOM()).
+func (d *MySQLDialect) RandomFunc() string { return "RAND()" }
 
 // JSONBindExpr returns a bare placeholder. MySQL/Dolt accept a JSON string
 // literal bound to a JSON column directly.
@@ -117,6 +129,10 @@ func (d *MySQLDialect) InsertOrIgnoreSuffix() string { return "" }
 // fresh Dolt databases need no ALTER TABLE catch-up (same stance as PG, which
 // keeps schema_pg.sql complete).
 func (d *MySQLDialect) LegacyColumnMigrations() []ColumnMigration { return nil }
+
+// UsesPartialIndexMigrations is false: MySQL/Dolt declares the equivalent
+// UNIQUE keys inline in schema_mysql.sql and cannot express partial indexes.
+func (d *MySQLDialect) UsesPartialIndexMigrations() bool { return false }
 
 // DatabaseSize sums data + index length for the current schema.
 func (d *MySQLDialect) DatabaseSize(db *sql.DB, _ string) (int64, error) {
@@ -152,9 +168,26 @@ func (d *MySQLDialect) IsDuplicateColumnError(err error) bool {
 	return isMySQLError(err, 1060)
 }
 
-// IsConflictError reports MySQL error 1062 (ER_DUP_ENTRY).
+// IsConflictError reports a unique-constraint conflict. Two shapes occur on
+// Dolt: the standard insert-time duplicate (1062), and a commit-time
+// constraint violation from Dolt's optimistic transaction model — concurrent
+// inserts of the same unique key each succeed locally and the violation
+// surfaces only when the working sets merge at COMMIT. Both are retryable.
 func (d *MySQLDialect) IsConflictError(err error) bool {
-	return isMySQLError(err, 1062)
+	return isMySQLError(err, 1062) || isDoltConstraintViolation(err)
+}
+
+// isDoltConstraintViolation matches Dolt's commit-time constraint-violation
+// error, a generic (1105) error whose message names the violation (e.g.
+// "Committing this transaction resulted in a working set with constraint
+// violations ... Unique Key Constraint Violation"). Retrying the idempotent
+// upsert resolves it: on the retry the conflicting row is committed and visible,
+// so ON CONFLICT collapses to it.
+func isDoltConstraintViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "constraint violation")
 }
 
 // IsNoSuchTableError reports MySQL error 1146 (ER_NO_SUCH_TABLE).

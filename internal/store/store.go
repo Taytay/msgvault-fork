@@ -65,26 +65,6 @@ func isSQLiteError(err error, substr string) bool {
 	return false
 }
 
-// IsPostgresURL returns true if the path looks like a PostgreSQL connection URL.
-// Exported so cmd-side helpers can decide whether to skip SQLite-only code
-// paths (e.g., the Parquet analytics cache) without first opening a Store.
-func IsPostgresURL(dbPath string) bool {
-	return strings.HasPrefix(dbPath, "postgresql://") || strings.HasPrefix(dbPath, "postgres://")
-}
-
-// IsMySQLURL returns true if the path looks like a MySQL / Dolt connection URL.
-// Dolt speaks the MySQL wire protocol, so both schemes route to the MySQL
-// backend. Exported alongside IsPostgresURL so cmd-side helpers can skip
-// file-only code paths (Parquet cache, backup VACUUM INTO) for server backends.
-func IsMySQLURL(dbPath string) bool {
-	return strings.HasPrefix(dbPath, "mysql://") || strings.HasPrefix(dbPath, "dolt://")
-}
-
-// IsServerURL reports whether the path is any non-file (client/server) DSN.
-func IsServerURL(dbPath string) bool {
-	return IsPostgresURL(dbPath) || IsMySQLURL(dbPath)
-}
-
 // mysqlDSNFromURL converts a mysql:// or dolt:// URL into the DSN form the
 // go-sql-driver/mysql driver expects (user:pass@tcp(host:port)/db?params).
 // parseTime is forced on so DATETIME columns scan into time.Time, and
@@ -117,6 +97,15 @@ func mysqlDSNFromURL(dbURL string) (string, error) {
 	if q.Get("loc") == "" {
 		q.Set("loc", "UTC")
 	}
+	// The query engine's aggregates are written for the lenient GROUP BY
+	// semantics SQLite and PostgreSQL use (e.g. COUNT(*) OVER() alongside an
+	// aggregated GROUP BY). Dolt defaults to ONLY_FULL_GROUP_BY and rejects
+	// them, so drop that mode while keeping write strictness. go-sql-driver
+	// applies unknown DSN params as SET <var>=<value> on every connection, so
+	// this covers the whole pool. (Honored only if the caller didn't set it.)
+	if q.Get("sql_mode") == "" {
+		q.Set("sql_mode", "'STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION'")
+	}
 
 	return fmt.Sprintf("%stcp(%s)/%s?%s", userInfo, host, dbName, q.Encode()), nil
 }
@@ -133,13 +122,36 @@ const testSQLiteParams = "?_journal_mode=WAL&_busy_timeout=30000&_synchronous=OF
 // If dbPath is a postgres:// or postgresql:// URL, opens a PostgreSQL connection.
 // Otherwise, opens a SQLite database at the file path.
 func Open(dbPath string) (*Store, error) {
-	if IsPostgresURL(dbPath) {
+	switch BackendOfDSN(dbPath) {
+	case BackendPostgreSQL:
 		return openPostgres(dbPath)
-	}
-	if IsMySQLURL(dbPath) {
+	case BackendDolt:
 		return openDolt(dbPath)
+	default:
+		return openSQLite(dbPath, defaultSQLiteParams)
 	}
-	return openSQLite(dbPath, defaultSQLiteParams)
+}
+
+// ErrDatabaseNotFound is returned by OpenExisting when a file-backed database
+// does not exist. Callers test for it with errors.Is to surface a setup hint
+// ("run init-db") without knowing which backends are file-backed.
+var ErrDatabaseNotFound = errors.New("database does not exist")
+
+// OpenExisting opens a database that must already exist. For file-backed
+// backends (SQLite) a missing file yields ErrDatabaseNotFound instead of
+// silently creating an empty database; client/server backends behave like
+// Open. Commands that must not auto-create (build-cache, etc.) use this so they
+// need not know which backends live in a file.
+func OpenExisting(dbPath string) (*Store, error) {
+	if BackendOfDSN(dbPath) == BackendSQLite && !strings.Contains(dbPath, ":memory:") {
+		if _, err := os.Stat(dbPath); err != nil {
+			if os.IsNotExist(err) {
+				return nil, fmt.Errorf("%s: %w", dbPath, ErrDatabaseNotFound)
+			}
+			return nil, fmt.Errorf("stat database %s: %w", dbPath, err)
+		}
+	}
+	return Open(dbPath)
 }
 
 // OpenForTest opens or creates a database tuned for test use: ephemeral,
@@ -149,13 +161,14 @@ func Open(dbPath string) (*Store, error) {
 // Not for production use — a process crash mid-test can leave a corrupt
 // database, which is fine because tests recreate it from scratch.
 func OpenForTest(dbPath string) (*Store, error) {
-	if IsPostgresURL(dbPath) {
+	switch BackendOfDSN(dbPath) {
+	case BackendPostgreSQL:
 		return openPostgres(dbPath)
-	}
-	if IsMySQLURL(dbPath) {
+	case BackendDolt:
 		return openDolt(dbPath)
+	default:
+		return openSQLite(dbPath, testSQLiteParams)
 	}
-	return openSQLite(dbPath, testSQLiteParams)
 }
 
 // openSQLite opens a SQLite database at the given file path with the
@@ -269,9 +282,12 @@ func openDolt(dbURL string) (*Store, error) {
 
 	// Every package-internal statement flows through loggedDB's rewrite hook.
 	// For Dolt that means: translate canonical ON CONFLICT upserts to MySQL
-	// syntax, then apply the (no-op) placeholder rebind. This keeps the ~12
-	// inline upsert call sites backend-agnostic.
-	rewrite := func(q string) string { return dialect.Rebind(dialect.RewriteUpsert(q)) }
+	// syntax and the canonical LIKE ESCAPE '\' clause to MySQL's '\\', then
+	// apply the (no-op) placeholder rebind. This keeps the inline upsert/search
+	// call sites backend-agnostic.
+	rewrite := func(q string) string {
+		return dialect.Rebind(dialect.RewriteLikeEscape(dialect.RewriteUpsert(q)))
+	}
 
 	return &Store{
 		db:      newLoggedDB(db, rewrite),
@@ -285,10 +301,10 @@ func openDolt(dbURL string) (*Store, error) {
 // same database concurrently. Does not create the database, run migrations,
 // or checkpoint WAL on close.
 func OpenReadOnly(dbPath string) (*Store, error) {
-	if IsPostgresURL(dbPath) {
+	switch BackendOfDSN(dbPath) {
+	case BackendPostgreSQL:
 		return openPostgresReadOnly(dbPath)
-	}
-	if IsMySQLURL(dbPath) {
+	case BackendDolt:
 		// Dolt has no per-connection read-only enforcement: it accepts
 		// transaction_read_only but does not block writes on it, and
 		// @@read_only is global (would freeze the whole server, not this
@@ -451,21 +467,6 @@ func (s *Store) DB() *sql.DB {
 	return s.db.DB
 }
 
-// IsPostgreSQL reports whether this store is backed by PostgreSQL.
-// Engine factories use this to choose between the SQLite and PostgreSQL
-// query paths.
-func (s *Store) IsPostgreSQL() bool {
-	return s.dialect.DriverName() == "pgx"
-}
-
-// IsMySQL reports whether this store is backed by MySQL/Dolt.
-func (s *Store) IsMySQL() bool {
-	return s.dialect.DriverName() == "mysql"
-}
-
-// isMySQL is the unexported form used by intra-package backend gating.
-func (s *Store) isMySQL() bool { return s.dialect.DriverName() == "mysql" }
-
 // WithExclusiveLock executes fn while holding an exclusive write lock on the
 // database. In WAL mode this blocks concurrent writers (e.g. StartSync) while
 // allowing reads (e.g. IsAttachmentPathReferenced) to proceed. Use this to
@@ -506,6 +507,28 @@ func (s *Store) WithExclusiveLock(ctx context.Context, fn func() error) error {
 // the transaction is rolled back; otherwise it is committed. The callback
 // receives *loggedTx so every statement inside the transaction goes through
 // the dialect's Rebind automatically.
+// retryOnConflict runs fn, retrying when the dialect reports a unique-constraint
+// conflict. It exists for Dolt's optimistic transaction model, where concurrent
+// inserts of the same key conflict at COMMIT rather than at INSERT; on retry the
+// winning row is visible and the idempotent upsert (ON CONFLICT DO NOTHING /
+// DO UPDATE) collapses to it. On SQLite and PostgreSQL those upserts never raise
+// a conflict error, so fn runs exactly once and this is a thin pass-through.
+func (s *Store) retryOnConflict(fn func() error) error {
+	const maxAttempts = 25
+	var err error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		err = fn()
+		if err == nil || !s.dialect.IsConflictError(err) {
+			return err
+		}
+		// Back off with per-goroutine jitter so a thundering herd of racers
+		// de-synchronizes instead of colliding on every retry.
+		jitter := time.Duration(time.Now().UnixNano()%5) * time.Millisecond
+		time.Sleep(time.Duration(attempt)*time.Millisecond + jitter)
+	}
+	return err
+}
+
 func (s *Store) withTx(fn func(tx *loggedTx) error) error {
 	start := time.Now()
 	slog.Debug("sql tx begin")
@@ -704,11 +727,11 @@ func (s *Store) InitSchema() error {
 	// Dedupe before creating the partial unique index that enforces
 	// idempotency going forward. Both steps are idempotent.
 	//
-	// Skipped on MySQL/Dolt: the partial-index predicate
-	// (WHERE content_hash IS NOT NULL AND content_hash != '') is not
-	// expressible in MySQL, and schema_mysql.sql declares the equivalent
-	// index inline, so there is no separate CREATE INDEX to run here.
-	if !s.isMySQL() {
+	// Gated on the dialect: backends that build partial unique indexes via
+	// app-side migration (SQLite, PostgreSQL) run this; MySQL/Dolt declares the
+	// equivalent index inline in schema_mysql.sql and cannot express the partial
+	// predicate (WHERE content_hash IS NOT NULL AND content_hash != '').
+	if s.dialect.UsesPartialIndexMigrations() {
 		if err := s.dedupeAttachmentsBeforeUniqueIndex(); err != nil {
 			return fmt.Errorf("dedupe attachments: %w", err)
 		}
@@ -729,12 +752,11 @@ func (s *Store) InitSchema() error {
 	// matching unique constraint on upgraded DBs. Run a one-shot
 	// migration that dedupes phone rows, drops the index, and
 	// recreates it as UNIQUE.
-	// Skipped on MySQL/Dolt: schema_mysql.sql already declares
-	// idx_participants_phone as a plain UNIQUE key (MySQL UNIQUE indexes
-	// permit multiple NULLs, matching the PG/SQLite partial-index intent),
-	// and the upgrade path that drops/recreates a legacy non-unique index
-	// uses SQLite/PG-specific DDL.
-	if !s.isMySQL() {
+	// Gated on the same dialect predicate: MySQL/Dolt declares
+	// idx_participants_phone as a plain UNIQUE key inline (MySQL UNIQUE indexes
+	// permit multiple NULLs, matching the PG/SQLite partial-index intent), and
+	// the drop/recreate upgrade path uses SQLite/PG-specific DDL.
+	if s.dialect.UsesPartialIndexMigrations() {
 		if err := s.ensureParticipantsPhoneUniqueIndex(); err != nil {
 			return fmt.Errorf("ensure idx_participants_phone unique: %w", err)
 		}

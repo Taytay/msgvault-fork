@@ -122,7 +122,7 @@ func TestSetupVectorFeatures_Disabled(t *testing.T) {
 	cfg = &config.Config{}
 	cfg.Vector.Enabled = false
 
-	vf, err := setupVectorFeatures(context.Background(), nil, "")
+	vf, err := setupVectorFeatures(context.Background(), nil)
 	requirepkg.NoError(t, err, "setupVectorFeatures")
 	assertpkg.Nil(t, vf, "setupVectorFeatures should be nil when disabled")
 }
@@ -133,14 +133,23 @@ func TestSetupVectorFeatures_Disabled(t *testing.T) {
 // fail closed at the entry point rather than crashing downstream when
 // sql.Open("sqlite3", "postgres://...") gets a non-sqlite DSN.
 func TestSetupVectorFeatures_RefusesPostgres(t *testing.T) {
+	dsn := os.Getenv("MSGVAULT_TEST_DB")
+	if !strings.HasPrefix(dsn, "postgres://") && !strings.HasPrefix(dsn, "postgresql://") {
+		t.Skip("set MSGVAULT_TEST_DB=postgres://... to run the PostgreSQL refusal case")
+	}
+
 	savedCfg := cfg
 	defer func() { cfg = savedCfg }()
 	cfg = &config.Config{}
 	cfg.Vector.Enabled = true
 
-	_, err := setupVectorFeatures(context.Background(), nil, "postgres://user@host/db")
-	requirepkg.Error(t, err, "setupVectorFeatures with postgres DSN")
-	assertpkg.ErrorContains(t, err, "SQLite-only")
+	s, err := store.Open(dsn)
+	requirepkg.NoError(t, err, "open postgres store")
+	defer func() { _ = s.Close() }()
+
+	_, err = setupVectorFeatures(context.Background(), s)
+	requirepkg.Error(t, err, "setupVectorFeatures with postgres store")
+	assertpkg.ErrorContains(t, err, "not supported on the PostgreSQL backend")
 }
 
 // TestFindScheduledSyncSource verifies that the scheduler's

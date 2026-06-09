@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -11,6 +12,63 @@ import (
 	_ "github.com/mattn/go-sqlite3" // SQLite driver
 )
 
+// SubsetExporter copies the most recent rowCount messages (and every row they
+// reference) into a new store of the same backend. Each backend produces the
+// artifact natural to it — SQLite writes a new msgvault.db file in a directory;
+// Dolt creates a new database on the same server — so the meaning of dest is
+// backend-specific (see DestinationHint). PostgreSQL does not expose it.
+//
+// This is the seam that keeps `create-subset` backend-agnostic: the command
+// asks the opened store for the capability and forwards the user's --output
+// value; all backend knowledge lives in the implementation.
+type SubsetExporter interface {
+	// ExportSubset copies the rowCount most recent messages into a new store
+	// described by dest and returns a summary.
+	ExportSubset(ctx context.Context, rowCount int, dest string) (*CopyResult, error)
+	// DestinationHint describes what dest means on this backend, for CLI help
+	// and error messages.
+	DestinationHint() string
+}
+
+// SubsetExporter returns the subset-export capability for backends that can
+// produce a self-contained subset (SQLite, Dolt) and (nil, false) otherwise.
+func (s *Store) SubsetExporter() (SubsetExporter, bool) {
+	switch s.Backend() {
+	case BackendSQLite:
+		// Needs a real file to ATTACH; in-memory stores have nothing to copy.
+		if lf, ok := s.localFile(); ok {
+			return sqliteSubsetExporter{srcPath: lf.path}, true
+		}
+		return nil, false
+	case BackendDolt:
+		return doltSubsetExporter{src: s}, true
+	default:
+		return nil, false
+	}
+}
+
+// sqliteSubsetExporter writes the subset to a new msgvault.db file via the
+// ATTACH-based CopySubset. dest is the output directory.
+type sqliteSubsetExporter struct{ srcPath string }
+
+func (e sqliteSubsetExporter) DestinationHint() string {
+	return "an output directory (a new msgvault.db is created inside)"
+}
+
+func (e sqliteSubsetExporter) ExportSubset(_ context.Context, rowCount int, dest string) (*CopyResult, error) {
+	dir, err := filepath.Abs(dest)
+	if err != nil {
+		return nil, fmt.Errorf("resolve output path: %w", err)
+	}
+	result, err := CopySubset(e.srcPath, dir, rowCount)
+	if err != nil {
+		return nil, err
+	}
+	result.Location = filepath.Join(dir, "msgvault.db")
+	result.UsageHint = fmt.Sprintf("MSGVAULT_HOME=%s msgvault tui", dir)
+	return result, nil
+}
+
 // CopyResult holds the summary of a subset copy operation.
 type CopyResult struct {
 	Messages      int64
@@ -20,6 +78,12 @@ type CopyResult struct {
 	Sources       int64
 	DBSize        int64
 	Elapsed       time.Duration
+	// Location is a human-readable description of where the subset was written
+	// (a file path for SQLite, a database name for Dolt). UsageHint tells the
+	// user how to open it. Both are set by the exporter so the command need not
+	// know the backend.
+	Location  string
+	UsageHint string
 }
 
 // CopySubset copies rowCount most recent messages (and all referenced
@@ -33,6 +97,34 @@ func CopySubset(
 ) (*CopyResult, error) {
 	if rowCount <= 0 {
 		return nil, fmt.Errorf("rowCount must be positive, got %d", rowCount)
+	}
+	// CopySubset is implemented with SQLite ATTACH DATABASE against local
+	// files; client/server backends cannot be a source. The check lives here,
+	// with the ATTACH logic it guards, rather than in the calling command.
+	if b := BackendOfDSN(srcDBPath); b != BackendSQLite {
+		return nil, fmt.Errorf("create-subset requires a local SQLite source database (it uses ATTACH DATABASE); %q is a %s backend", srcDBPath, b)
+	}
+
+	// Validate the source up front — before creating the destination — so a
+	// missing or malformed source fails fast and ATTACH never creates an empty
+	// file for a bad path. Missing-source is reported via ErrDatabaseNotFound
+	// so callers can add a setup hint without inspecting the backend.
+	srcDBPath, err := filepath.Abs(filepath.Clean(srcDBPath))
+	if err != nil {
+		return nil, fmt.Errorf("canonicalize source path: %w", err)
+	}
+	for _, r := range srcDBPath {
+		if r < 0x20 || r == 0x7F {
+			return nil, fmt.Errorf(
+				"source database path contains control character (0x%02X)", r,
+			)
+		}
+	}
+	if _, err := os.Stat(srcDBPath); err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("source database not found: %s: %w", srcDBPath, ErrDatabaseNotFound)
+		}
+		return nil, fmt.Errorf("source database not found: %w", err)
 	}
 
 	start := time.Now()
@@ -81,26 +173,6 @@ func CopySubset(
 		return nil, fmt.Errorf("close schema database: %w", err)
 	}
 
-	// Validate source path before opening destination DB, so
-	// ATTACH doesn't silently create an empty file for a bad path.
-	srcDBPath, err = filepath.Abs(filepath.Clean(srcDBPath))
-	if err != nil {
-		cleanup()
-		return nil, fmt.Errorf("canonicalize source path: %w", err)
-	}
-	for _, r := range srcDBPath {
-		if r < 0x20 || r == 0x7F {
-			cleanup()
-			return nil, fmt.Errorf(
-				"source database path contains control character (0x%02X)", r,
-			)
-		}
-	}
-	if _, err := os.Stat(srcDBPath); err != nil {
-		cleanup()
-		return nil, fmt.Errorf("source database not found: %w", err)
-	}
-
 	// Phase 2: re-open with foreign keys OFF for bulk copy
 	dsn := dstDBPath +
 		"?_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=OFF"
@@ -132,7 +204,7 @@ func CopySubset(
 		return nil, fmt.Errorf("begin transaction: %w", err)
 	}
 
-	result, err := copyData(tx, rowCount)
+	result, err := copyData(tx, "src.", "", "", rowCount)
 	if err != nil {
 		_ = tx.Rollback()
 		_, _ = db.Exec("DETACH DATABASE src")
@@ -225,47 +297,61 @@ func verifyForeignKeys(db *sql.DB) error {
 }
 
 // copyData executes INSERT INTO ... SELECT in dependency order.
-func copyData(tx *sql.Tx, rowCount int) (*CopyResult, error) {
+// copyData runs the dependency-ordered subset copy. srcQ/dstQ are the
+// table-name qualifiers for the source and destination: SQLite passes
+// ("src.", "") — source is ATTACH'd as "src", destination is the connection's
+// main schema — while Dolt passes ("<srcdb>.", "<destdb>.") to copy between two
+// databases on one server. selected_messages is a session TEMPORARY table
+// (referenced unqualified on both backends). The caller runs this with foreign
+// keys disabled (SQLite: _foreign_keys=OFF DSN; Dolt: SET FOREIGN_KEY_CHECKS=0)
+// so insertion order need not be a strict topological sort.
+// attachmentCols, when non-empty, is an explicit comma-separated column list
+// for the attachments copy (INSERT … (cols) SELECT cols …). It excludes
+// generated columns: schema_mysql.sql defines attachments.dedup_content_hash
+// as STORED GENERATED, and Dolt/MySQL rejects writing a value into a generated
+// column, so SELECT * cannot be used there. SQLite has no generated columns and
+// passes "" to keep SELECT *.
+func copyData(tx *sql.Tx, srcQ, dstQ, attachmentCols string, rowCount int) (*CopyResult, error) {
 	result := &CopyResult{}
 
 	if _, err := tx.Exec(fmt.Sprintf(`
-		CREATE TEMP TABLE selected_messages AS
-		SELECT id FROM src.messages
+		CREATE TEMPORARY TABLE selected_messages AS
+		SELECT id FROM %smessages
 		WHERE %s
 		ORDER BY COALESCE(sent_at, received_at, internal_date)
-			DESC, id DESC LIMIT ?`, LiveMessagesWhere("", true)), rowCount); err != nil {
+			DESC, id DESC LIMIT ?`, srcQ, LiveMessagesWhere("", true)), rowCount); err != nil {
 		return nil, fmt.Errorf("select messages: %w", err)
 	}
 
 	// Try copying with oauth_app column first; fall back to NULL
 	// for source databases created before this column existed.
-	res, err := tx.Exec(`
-		INSERT INTO sources
+	res, err := tx.Exec(fmt.Sprintf(`
+		INSERT INTO %ssources
 			(id, source_type, identifier, display_name, google_user_id,
 			 last_sync_at, sync_cursor, sync_config, oauth_app,
 			 created_at, updated_at)
 		SELECT id, source_type, identifier, display_name, google_user_id,
 		       last_sync_at, sync_cursor, sync_config, oauth_app,
 		       created_at, updated_at
-		FROM src.sources
+		FROM %ssources
 		WHERE id IN (
-			SELECT DISTINCT source_id FROM src.messages
+			SELECT DISTINCT source_id FROM %smessages
 			WHERE id IN (SELECT id FROM selected_messages)
-		)`)
+		)`, dstQ, srcQ, srcQ))
 	if err != nil && isSQLiteError(err, "no such column") {
-		res, err = tx.Exec(`
-			INSERT INTO sources
+		res, err = tx.Exec(fmt.Sprintf(`
+			INSERT INTO %ssources
 				(id, source_type, identifier, display_name, google_user_id,
 				 last_sync_at, sync_cursor, sync_config, oauth_app,
 				 created_at, updated_at)
 			SELECT id, source_type, identifier, display_name, google_user_id,
 			       last_sync_at, sync_cursor, sync_config, NULL,
 			       created_at, updated_at
-			FROM src.sources
+			FROM %ssources
 			WHERE id IN (
-				SELECT DISTINCT source_id FROM src.messages
+				SELECT DISTINCT source_id FROM %smessages
 				WHERE id IN (SELECT id FROM selected_messages)
-			)`)
+			)`, dstQ, srcQ, srcQ))
 	}
 	if err != nil {
 		return nil, fmt.Errorf("copy sources: %w", err)
@@ -280,12 +366,12 @@ func copyData(tx *sql.Tx, rowCount int) (*CopyResult, error) {
 		return nil, fmt.Errorf("count selected messages: %w", err)
 	}
 
-	res, err = tx.Exec(`
-		INSERT INTO conversations SELECT * FROM src.conversations
+	res, err = tx.Exec(fmt.Sprintf(`
+		INSERT INTO %sconversations SELECT * FROM %sconversations
 		WHERE id IN (
-			SELECT DISTINCT conversation_id FROM src.messages
+			SELECT DISTINCT conversation_id FROM %smessages
 			WHERE id IN (SELECT id FROM selected_messages)
-		)`)
+		)`, dstQ, srcQ, srcQ))
 	if err != nil {
 		return nil, fmt.Errorf("copy conversations: %w", err)
 	}
@@ -293,18 +379,18 @@ func copyData(tx *sql.Tx, rowCount int) (*CopyResult, error) {
 		return nil, fmt.Errorf("conversations rows affected: %w", err)
 	}
 
-	res, err = tx.Exec(`
-		INSERT INTO participants SELECT * FROM src.participants
+	res, err = tx.Exec(fmt.Sprintf(`
+		INSERT INTO %sparticipants SELECT * FROM %sparticipants
 		WHERE id IN (
-			SELECT sender_id FROM src.messages
+			SELECT sender_id FROM %smessages
 			WHERE id IN (SELECT id FROM selected_messages)
 			UNION
-			SELECT participant_id FROM src.message_recipients
+			SELECT participant_id FROM %smessage_recipients
 			WHERE message_id IN (SELECT id FROM selected_messages)
 			UNION
-			SELECT participant_id FROM src.reactions
+			SELECT participant_id FROM %sreactions
 			WHERE message_id IN (SELECT id FROM selected_messages)
-		)`)
+		)`, dstQ, srcQ, srcQ, srcQ, srcQ))
 	if err != nil {
 		return nil, fmt.Errorf("copy participants: %w", err)
 	}
@@ -312,76 +398,82 @@ func copyData(tx *sql.Tx, rowCount int) (*CopyResult, error) {
 		return nil, fmt.Errorf("participants rows affected: %w", err)
 	}
 
-	if _, err := tx.Exec(`
-		INSERT INTO participant_identifiers
-		SELECT * FROM src.participant_identifiers
-		WHERE participant_id IN (SELECT id FROM participants)`); err != nil {
+	if _, err := tx.Exec(fmt.Sprintf(`
+		INSERT INTO %sparticipant_identifiers
+		SELECT * FROM %sparticipant_identifiers
+		WHERE participant_id IN (SELECT id FROM %sparticipants)`, dstQ, srcQ, dstQ)); err != nil {
 		return nil, fmt.Errorf("copy participant_identifiers: %w", err)
 	}
 
-	if _, err := tx.Exec(`
-		INSERT INTO conversation_participants
-		SELECT * FROM src.conversation_participants
-		WHERE conversation_id IN (SELECT id FROM conversations)
-		  AND participant_id IN (SELECT id FROM participants)`); err != nil {
+	if _, err := tx.Exec(fmt.Sprintf(`
+		INSERT INTO %sconversation_participants
+		SELECT * FROM %sconversation_participants
+		WHERE conversation_id IN (SELECT id FROM %sconversations)
+		  AND participant_id IN (SELECT id FROM %sparticipants)`, dstQ, srcQ, dstQ, dstQ)); err != nil {
 		return nil, fmt.Errorf("copy conversation_participants: %w", err)
 	}
 
-	if _, err := tx.Exec(`
-		INSERT INTO messages SELECT * FROM src.messages
-		WHERE id IN (SELECT id FROM selected_messages)`); err != nil {
+	if _, err := tx.Exec(fmt.Sprintf(`
+		INSERT INTO %smessages SELECT * FROM %smessages
+		WHERE id IN (SELECT id FROM selected_messages)`, dstQ, srcQ)); err != nil {
 		return nil, fmt.Errorf("copy messages: %w", err)
 	}
 
 	// Null out reply_to_message_id when the parent message wasn't
 	// selected, to avoid FK violations from dangling references.
-	if _, err := tx.Exec(`
-		UPDATE messages SET reply_to_message_id = NULL
+	if _, err := tx.Exec(fmt.Sprintf(`
+		UPDATE %smessages SET reply_to_message_id = NULL
 		WHERE reply_to_message_id IS NOT NULL
 		  AND reply_to_message_id NOT IN (
-			SELECT id FROM messages
-		)`); err != nil {
+			SELECT id FROM selected_messages
+		)`, dstQ)); err != nil {
 		return nil, fmt.Errorf("clear orphan reply refs: %w", err)
 	}
 
-	if _, err := tx.Exec(`
-		INSERT INTO message_bodies SELECT * FROM src.message_bodies
-		WHERE message_id IN (SELECT id FROM selected_messages)`); err != nil {
+	if _, err := tx.Exec(fmt.Sprintf(`
+		INSERT INTO %smessage_bodies SELECT * FROM %smessage_bodies
+		WHERE message_id IN (SELECT id FROM selected_messages)`, dstQ, srcQ)); err != nil {
 		return nil, fmt.Errorf("copy message_bodies: %w", err)
 	}
 
-	if _, err := tx.Exec(`
-		INSERT INTO message_raw SELECT * FROM src.message_raw
-		WHERE message_id IN (SELECT id FROM selected_messages)`); err != nil {
+	if _, err := tx.Exec(fmt.Sprintf(`
+		INSERT INTO %smessage_raw SELECT * FROM %smessage_raw
+		WHERE message_id IN (SELECT id FROM selected_messages)`, dstQ, srcQ)); err != nil {
 		return nil, fmt.Errorf("copy message_raw: %w", err)
 	}
 
-	if _, err := tx.Exec(`
-		INSERT INTO message_recipients
-		SELECT * FROM src.message_recipients
-		WHERE message_id IN (SELECT id FROM selected_messages)`); err != nil {
+	if _, err := tx.Exec(fmt.Sprintf(`
+		INSERT INTO %smessage_recipients
+		SELECT * FROM %smessage_recipients
+		WHERE message_id IN (SELECT id FROM selected_messages)`, dstQ, srcQ)); err != nil {
 		return nil, fmt.Errorf("copy message_recipients: %w", err)
 	}
 
-	if _, err := tx.Exec(`
-		INSERT INTO reactions SELECT * FROM src.reactions
-		WHERE message_id IN (SELECT id FROM selected_messages)`); err != nil {
+	if _, err := tx.Exec(fmt.Sprintf(`
+		INSERT INTO %sreactions SELECT * FROM %sreactions
+		WHERE message_id IN (SELECT id FROM selected_messages)`, dstQ, srcQ)); err != nil {
 		return nil, fmt.Errorf("copy reactions: %w", err)
 	}
 
-	if _, err := tx.Exec(`
-		INSERT INTO attachments SELECT * FROM src.attachments
-		WHERE message_id IN (SELECT id FROM selected_messages)`); err != nil {
+	attSelect, attInsertCols := "*", ""
+	if attachmentCols != "" {
+		attSelect = attachmentCols
+		attInsertCols = " (" + attachmentCols + ")"
+	}
+	if _, err := tx.Exec(fmt.Sprintf(`
+		INSERT INTO %sattachments%s SELECT %s FROM %sattachments
+		WHERE message_id IN (SELECT id FROM selected_messages)`,
+		dstQ, attInsertCols, attSelect, srcQ)); err != nil {
 		return nil, fmt.Errorf("copy attachments: %w", err)
 	}
 
-	res, err = tx.Exec(`
-		INSERT INTO labels SELECT * FROM src.labels
-		WHERE source_id IN (SELECT id FROM sources)
+	res, err = tx.Exec(fmt.Sprintf(`
+		INSERT INTO %slabels SELECT * FROM %slabels
+		WHERE source_id IN (SELECT id FROM %ssources)
 		   OR id IN (
-			SELECT label_id FROM src.message_labels
+			SELECT label_id FROM %smessage_labels
 			WHERE message_id IN (SELECT id FROM selected_messages)
-		)`)
+		)`, dstQ, srcQ, dstQ, srcQ))
 	if err != nil {
 		return nil, fmt.Errorf("copy labels: %w", err)
 	}
@@ -389,10 +481,10 @@ func copyData(tx *sql.Tx, rowCount int) (*CopyResult, error) {
 		return nil, fmt.Errorf("labels rows affected: %w", err)
 	}
 
-	if _, err := tx.Exec(`
-		INSERT INTO message_labels SELECT * FROM src.message_labels
+	if _, err := tx.Exec(fmt.Sprintf(`
+		INSERT INTO %smessage_labels SELECT * FROM %smessage_labels
 		WHERE message_id IN (SELECT id FROM selected_messages)
-		  AND label_id IN (SELECT id FROM labels)`); err != nil {
+		  AND label_id IN (SELECT id FROM %slabels)`, dstQ, srcQ, dstQ)); err != nil {
 		return nil, fmt.Errorf("copy message_labels: %w", err)
 	}
 

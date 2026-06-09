@@ -32,6 +32,9 @@ func (d *PostgreSQLDialect) Now() string { return "NOW()" }
 // type and rejects integer comparisons (`col = 1`) against boolean columns.
 func (d *PostgreSQLDialect) BoolTrueExpr(col string) string { return col }
 
+// RandomFunc returns PostgreSQL's random function (same spelling as SQLite).
+func (d *PostgreSQLDialect) RandomFunc() string { return "RANDOM()" }
+
 // JSONBindExpr returns "?::JSONB" — PG won't implicit-cast text to JSONB,
 // so a bare placeholder bound to a Go string raises a column-type
 // mismatch on the sources.sync_config write path.
@@ -208,6 +211,10 @@ func (d *PostgreSQLDialect) FTSRebuildSchema(db *sql.DB) error {
 //
 //	INTEGER (id ref) → BIGINT, INTEGER (counter) → INTEGER,
 //	TEXT → TEXT, DATETIME → TIMESTAMPTZ, JSON → JSONB.
+// UsesPartialIndexMigrations is true: PostgreSQL builds its partial unique
+// indexes via the app-side InitSchema migrations.
+func (d *PostgreSQLDialect) UsesPartialIndexMigrations() bool { return true }
+
 func (d *PostgreSQLDialect) LegacyColumnMigrations() []ColumnMigration {
 	return []ColumnMigration{
 		{`ALTER TABLE sources ADD COLUMN IF NOT EXISTS sync_config JSONB`, "sync_config"},

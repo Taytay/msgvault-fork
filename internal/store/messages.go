@@ -365,13 +365,15 @@ func (s *Store) EnsureParticipant(email, displayName, domain string) (int64, err
 	// the same column) makes RETURNING fire for both INSERT and the
 	// existing-row case, giving us the id either way.
 	var id int64
-	err := s.db.QueryRow(fmt.Sprintf(`
-		INSERT INTO participants (email_address, display_name, domain, created_at, updated_at)
-		VALUES (?, ?, ?, %s, %s)
-		ON CONFLICT (email_address) WHERE email_address IS NOT NULL
-			DO UPDATE SET email_address = EXCLUDED.email_address
-		RETURNING id
-	`, s.dialect.Now(), s.dialect.Now()), email, displayName, domain).Scan(&id)
+	err := s.retryOnConflict(func() error {
+		return s.db.QueryRow(fmt.Sprintf(`
+			INSERT INTO participants (email_address, display_name, domain, created_at, updated_at)
+			VALUES (?, ?, ?, %s, %s)
+			ON CONFLICT (email_address) WHERE email_address IS NOT NULL
+				DO UPDATE SET email_address = EXCLUDED.email_address
+			RETURNING id
+		`, s.dialect.Now(), s.dialect.Now()), email, displayName, domain).Scan(&id)
+	})
 	if err != nil {
 		return 0, err
 	}
@@ -886,9 +888,9 @@ func (s *Store) GetRandomMessageIDs(sourceID int64, limit int) ([]int64, error) 
 		rows, err := s.db.Query(fmt.Sprintf(`
 			SELECT id FROM messages
 			WHERE source_id = ? AND %s
-			ORDER BY RANDOM()
+			ORDER BY %s
 			LIMIT ?
-		`, live), sourceID, limit)
+		`, live, s.dialect.RandomFunc()), sourceID, limit)
 		if err != nil {
 			return nil, err
 		}
@@ -1171,28 +1173,35 @@ func (s *Store) EnsureParticipantByPhone(phone, displayName, identifierType stri
 	// round-trip.
 	now := s.dialect.Now()
 	var id int64
-	err := s.db.QueryRow(fmt.Sprintf(`
-		INSERT INTO participants (phone_number, display_name, created_at, updated_at)
-		VALUES (?, ?, %s, %s)
-		ON CONFLICT (phone_number) WHERE phone_number IS NOT NULL
-			DO UPDATE SET display_name = CASE
-				WHEN COALESCE(NULLIF(TRIM(participants.display_name), ''), '') = ''
-				     AND EXCLUDED.display_name != ''
-				THEN EXCLUDED.display_name
-				ELSE participants.display_name
-			END
-		RETURNING id
-	`, now, now), phone, displayName).Scan(&id)
-	if err != nil {
-		return 0, fmt.Errorf("upsert participant by phone: %w", err)
-	}
+	// Both statements run under one retry: on Dolt either the participant
+	// upsert or the identifier insert can surface a commit-time conflict under
+	// concurrency, and both are idempotent on retry.
+	err := s.retryOnConflict(func() error {
+		if err := s.db.QueryRow(fmt.Sprintf(`
+			INSERT INTO participants (phone_number, display_name, created_at, updated_at)
+			VALUES (?, ?, %s, %s)
+			ON CONFLICT (phone_number) WHERE phone_number IS NOT NULL
+				DO UPDATE SET display_name = CASE
+					WHEN COALESCE(NULLIF(TRIM(participants.display_name), ''), '') = ''
+					     AND EXCLUDED.display_name != ''
+					THEN EXCLUDED.display_name
+					ELSE participants.display_name
+				END
+			RETURNING id
+		`, now, now), phone, displayName).Scan(&id); err != nil {
+			return fmt.Errorf("upsert participant by phone: %w", err)
+		}
 
-	// Ensure a participant_identifiers row exists for this identifierType.
-	// INSERT OR IGNORE is idempotent: a second call with the same type is a no-op.
-	_, err = s.db.Exec(s.dialect.InsertOrIgnore(`INSERT OR IGNORE INTO participant_identifiers (participant_id, identifier_type, identifier_value, is_primary)
-		VALUES (?, ?, ?, TRUE)`), id, identifierType, phone)
+		// Ensure a participant_identifiers row exists for this identifierType.
+		// INSERT OR IGNORE is idempotent: a second call with the same type is a no-op.
+		if _, err := s.db.Exec(s.dialect.InsertOrIgnore(`INSERT OR IGNORE INTO participant_identifiers (participant_id, identifier_type, identifier_value, is_primary)
+			VALUES (?, ?, ?, TRUE)`), id, identifierType, phone); err != nil {
+			return fmt.Errorf("insert participant identifier: %w", err)
+		}
+		return nil
+	})
 	if err != nil {
-		return 0, fmt.Errorf("insert participant identifier: %w", err)
+		return 0, err
 	}
 
 	return id, nil
@@ -1693,12 +1702,14 @@ func (s *Store) IsAttachmentPathReferenced(storagePath string) (bool, error) {
 // succeed.
 func (s *Store) UpsertAttachment(messageID int64, filename, mimeType, storagePath, contentHash string, size int) error {
 	if contentHash != "" {
-		_, err := s.db.Exec(fmt.Sprintf(`
-			INSERT INTO attachments (message_id, filename, mime_type, storage_path, content_hash, size, created_at)
-			VALUES (?, ?, ?, ?, ?, ?, %s)
-			ON CONFLICT (message_id, content_hash) WHERE content_hash IS NOT NULL AND content_hash != '' DO NOTHING
-		`, s.dialect.Now()), messageID, filename, mimeType, storagePath, contentHash, int64(size))
-		return err
+		return s.retryOnConflict(func() error {
+			_, err := s.db.Exec(fmt.Sprintf(`
+				INSERT INTO attachments (message_id, filename, mime_type, storage_path, content_hash, size, created_at)
+				VALUES (?, ?, ?, ?, ?, ?, %s)
+				ON CONFLICT (message_id, content_hash) WHERE content_hash IS NOT NULL AND content_hash != '' DO NOTHING
+			`, s.dialect.Now()), messageID, filename, mimeType, storagePath, contentHash, int64(size))
+			return err
+		})
 	}
 
 	var existingID int64

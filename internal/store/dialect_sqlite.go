@@ -29,6 +29,9 @@ func (d *SQLiteDialect) InsertOrIgnore(sql string) string { return sql }
 // BoolTrueExpr returns "col = 1" — SQLite stores booleans as 0/1 INTEGER.
 func (d *SQLiteDialect) BoolTrueExpr(col string) string { return col + " = 1" }
 
+// RandomFunc returns SQLite's random function.
+func (d *SQLiteDialect) RandomFunc() string { return "RANDOM()" }
+
 // JSONBindExpr is "?" on SQLite — JSON columns are plain TEXT.
 func (d *SQLiteDialect) JSONBindExpr() string { return "?" }
 
@@ -200,6 +203,10 @@ func (d *SQLiteDialect) FTSRebuildSchema(db *sql.DB) error {
 // LegacyColumnMigrations returns the ALTER TABLE ADD COLUMN statements that
 // bring older SQLite databases up to the current schema. IsDuplicateColumnError
 // silences these when the column already exists (idempotent migrations).
+// UsesPartialIndexMigrations is true: SQLite builds its partial unique indexes
+// via the app-side InitSchema migrations.
+func (d *SQLiteDialect) UsesPartialIndexMigrations() bool { return true }
+
 func (d *SQLiteDialect) LegacyColumnMigrations() []ColumnMigration {
 	return []ColumnMigration{
 		{`ALTER TABLE sources ADD COLUMN sync_config JSON`, "sync_config"},

@@ -60,6 +60,13 @@ type Dialect interface {
 	// must emit "col = 1"; PostgreSQL has a real BOOLEAN type and rejects
 	// integer comparisons, so the bare column name is the right form.
 	BoolTrueExpr(col string) string
+
+	// LikeEscape returns the "ESCAPE '<char>'" clause used after a LIKE that
+	// escapes wildcards with backslash. The escape character is always
+	// backslash; only its SQL-literal spelling differs. SQLite and PostgreSQL
+	// read '\' as a literal backslash; MySQL/Dolt process backslash escapes in
+	// string literals, so the backslash must be doubled to '\\'.
+	LikeEscape() string
 }
 
 // SQLiteQueryDialect implements Dialect for SQLite.
@@ -68,6 +75,9 @@ type SQLiteQueryDialect struct{}
 func (SQLiteQueryDialect) Rebind(query string) string { return query }
 
 func (SQLiteQueryDialect) BoolTrueExpr(col string) string { return col + " = 1" }
+
+// LikeEscape: SQLite reads '\' as a literal backslash.
+func (SQLiteQueryDialect) LikeEscape() string { return `ESCAPE '\'` }
 
 func (SQLiteQueryDialect) TimeTruncExpression(column string, granularity string) string {
 	switch granularity {
@@ -137,6 +147,9 @@ func (PostgreSQLQueryDialect) Rebind(query string) string {
 }
 
 func (PostgreSQLQueryDialect) BoolTrueExpr(col string) string { return col }
+
+// LikeEscape: PostgreSQL (standard_conforming_strings on) reads '\' literally.
+func (PostgreSQLQueryDialect) LikeEscape() string { return `ESCAPE '\'` }
 
 func (PostgreSQLQueryDialect) TimeTruncExpression(column string, granularity string) string {
 	switch granularity {
@@ -213,3 +226,52 @@ func (PostgreSQLQueryDialect) SanitizeFTSQuery(query string) string {
 	}
 	return strings.Join(parts, " & ")
 }
+
+// MySQLQueryDialect implements Dialect for MySQL/Dolt. Reads run directly
+// against the system of record (mirroring PostgreSQL) — there is no SQLite
+// replica or Parquet cache to maintain.
+type MySQLQueryDialect struct{}
+
+// Rebind is a no-op: MySQL uses ? placeholders natively, like SQLite.
+func (MySQLQueryDialect) Rebind(query string) string { return query }
+
+// BoolTrueExpr: MySQL/Dolt store booleans as TINYINT(1) 0/1, so compare to 1
+// (same as SQLite, unlike PostgreSQL's native BOOLEAN).
+func (MySQLQueryDialect) BoolTrueExpr(col string) string { return col + " = 1" }
+
+// LikeEscape: MySQL/Dolt process backslash escapes inside string literals, so
+// '\' would parse as an escaped quote — the backslash must be doubled.
+func (MySQLQueryDialect) LikeEscape() string { return `ESCAPE '\\'` }
+
+func (MySQLQueryDialect) TimeTruncExpression(column string, granularity string) string {
+	switch granularity {
+	case "year":
+		return fmt.Sprintf("DATE_FORMAT(%s, '%%Y')", column)
+	case "month":
+		return fmt.Sprintf("DATE_FORMAT(%s, '%%Y-%%m')", column)
+	case "day":
+		return fmt.Sprintf("DATE_FORMAT(%s, '%%Y-%%m-%%d')", column)
+	default:
+		return fmt.Sprintf("DATE_FORMAT(%s, '%%Y-%%m')", column)
+	}
+}
+
+// Full-text search: Dolt's base schema carries no FTS index — schema_mysql.sql
+// ships no search column, and the doltvec backend adds a runtime
+// FULLTEXT(subject, snippet) only when vector search is configured, serving
+// keyword/semantic search itself. The aggregate/list query engine therefore
+// reports "no FTS table" so free-text terms degrade to a portable LIKE scan on
+// subject/snippet (see SQLiteEngine.buildSearchQueryParts). HasFTSTableSQL
+// returns a constant 0; the other FTS hooks are never reached on that path but
+// return inert values for safety.
+func (MySQLQueryDialect) HasFTSTableSQL() string { return "SELECT 0" }
+
+func (MySQLQueryDialect) FTSSearchExpression() string { return "FALSE" }
+
+func (MySQLQueryDialect) FTSJoin() string { return "" }
+
+func (MySQLQueryDialect) BuildFTSTerm(terms []string) (expr string, arg string) {
+	return "FALSE", ""
+}
+
+func (MySQLQueryDialect) SanitizeFTSQuery(query string) string { return "" }

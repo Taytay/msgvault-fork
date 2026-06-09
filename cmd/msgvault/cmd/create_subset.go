@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -33,7 +32,7 @@ var (
 func init() {
 	createSubsetCmd.Flags().StringVarP(
 		&subsetOutput, "output", "o", "",
-		"destination directory (msgvault.db created inside)",
+		"destination: an output directory (SQLite) or a new database name (Dolt)",
 	)
 	createSubsetCmd.Flags().IntVar(
 		&subsetRows, "rows", 0,
@@ -53,44 +52,43 @@ func runCreateSubset(cmd *cobra.Command, _ []string) error {
 		return usageErr(cmd, errors.New("--rows must be a positive integer"))
 	}
 
-	srcDBPath := cfg.DatabaseDSN()
-	// store.CopySubset uses ATTACH DATABASE + SQLite-only file-stat
-	// semantics; refuse early on a PG DSN to mirror the equivalent
-	// guard in backupDatabase (cmd/msgvault/cmd/deduplicate.go).
-	if store.IsPostgresURL(srcDBPath) {
-		return errors.New("create-subset is SQLite-only (uses ATTACH DATABASE); not supported with PostgreSQL stores")
+	// Open the source store and ask it to subset itself. The backend's
+	// SubsetExporter owns how the copy happens and what `dest` means; the
+	// command never branches on backend type.
+	s, err := store.OpenExisting(cfg.DatabaseDSN())
+	if errors.Is(err, store.ErrDatabaseNotFound) {
+		return fmt.Errorf("source database not found: %s\nRun 'msgvault init-db' and sync first", cfg.DatabaseDSN())
 	}
-	if _, err := os.Stat(srcDBPath); os.IsNotExist(err) {
-		return fmt.Errorf(
-			"source database not found: %s\n"+
-				"Run 'msgvault init-db' and sync first",
-			srcDBPath,
-		)
+	if err != nil {
+		return fmt.Errorf("open source database: %w", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	exporter, ok := s.SubsetExporter()
+	if !ok {
+		return fmt.Errorf("create-subset is not supported on the %s backend", s.Backend())
 	}
 
-	dstDir, err := filepath.Abs(subsetOutput)
+	fmt.Fprintf(os.Stderr, "Copying %d messages to %s...\n", subsetRows, exporter.DestinationHint())
+
+	// The exporter interprets the raw --output value (directory for SQLite,
+	// database name for Dolt) and reports where it landed and how to use it.
+	result, err := exporter.ExportSubset(cmd.Context(), subsetRows, subsetOutput)
 	if err != nil {
-		return fmt.Errorf("resolve output path: %w", err)
+		return fmt.Errorf("create subset (destination is %s): %w", exporter.DestinationHint(), err)
 	}
 
 	fmt.Fprintf(os.Stderr,
-		"Copying %d messages from %s...\n", subsetRows, srcDBPath,
-	)
-
-	result, err := store.CopySubset(srcDBPath, dstDir, subsetRows)
-	if err != nil {
-		return fmt.Errorf("create subset: %w", err)
-	}
-
-	fmt.Fprintf(os.Stderr,
-		"Created subset (%s)\n", result.Elapsed.Round(time.Millisecond),
+		"Created subset: %s (%s)\n", result.Location, result.Elapsed.Round(time.Millisecond),
 	)
 	fmt.Printf("Sources:       %d\n", result.Sources)
 	fmt.Printf("Messages:      %d\n", result.Messages)
 	fmt.Printf("Conversations: %d\n", result.Conversations)
 	fmt.Printf("Participants:  %d\n", result.Participants)
 	fmt.Printf("Labels:        %d\n", result.Labels)
-	fmt.Printf("Database size: %s\n", formatSize(result.DBSize))
+	if result.DBSize > 0 {
+		fmt.Printf("Database size: %s\n", formatSize(result.DBSize))
+	}
 
 	if int64(subsetRows) > result.Messages {
 		fmt.Fprintf(os.Stderr,
@@ -99,9 +97,9 @@ func runCreateSubset(cmd *cobra.Command, _ []string) error {
 		)
 	}
 
-	fmt.Fprintf(os.Stderr,
-		"\nTo use: MSGVAULT_HOME=%s msgvault tui\n", dstDir,
-	)
+	if result.UsageHint != "" {
+		fmt.Fprintf(os.Stderr, "\nTo use: %s\n", result.UsageHint)
+	}
 
 	return nil
 }

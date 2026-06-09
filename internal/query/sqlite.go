@@ -192,16 +192,24 @@ func buildAggregateSQL(dim aggDimension, filterJoins string, filterWhere string,
 	// The outer derived table needs an explicit alias — PostgreSQL
 	// rejects subqueries in FROM without one ("syntax error at or near
 	// ')'"); SQLite tolerates either form, so `AS agg` is portable.
+	// Two notes on portability:
+	//   - agg_key, not key: KEY is reserved in MySQL/Dolt (SQLite/PostgreSQL
+	//     tolerate it unquoted).
+	//   - COUNT(*) OVER() (the total group count for pagination) lives in the
+	//     OUTER query, not beside the GROUP BY. Dolt rejects a window function
+	//     in the same SELECT as a GROUP BY as an ONLY_FULL_GROUP_BY violation
+	//     (even with that mode disabled); evaluating it over the grouped
+	//     derived table yields the same count and is valid on all backends.
 	return fmt.Sprintf(`
-		SELECT key, count, total_size, attachment_size, attachment_count, total_unique
+		SELECT agg_key, count, total_size, attachment_size, attachment_count,
+			COUNT(*) OVER() as total_unique
 		FROM (
 			SELECT
-				%s as key,
+				%s as agg_key,
 				COUNT(*) as count,
 				COALESCE(SUM(m.size_estimate), 0) as total_size,
 				COALESCE(SUM(att.att_size), 0) as attachment_size,
-				COALESCE(SUM(att.att_count), 0) as attachment_count,
-				COUNT(*) OVER() as total_unique
+				COALESCE(SUM(att.att_count), 0) as attachment_count
 			FROM messages m
 			%s
 			LEFT JOIN (
@@ -210,7 +218,7 @@ func buildAggregateSQL(dim aggDimension, filterJoins string, filterWhere string,
 				GROUP BY message_id
 			) att ON att.message_id = m.id
 			WHERE %s
-			GROUP BY key
+			GROUP BY agg_key
 		) AS agg
 		%s
 		LIMIT ?
@@ -263,7 +271,7 @@ func sortClause(opts AggregateOptions) (string, error) {
 	case SortByAttachmentSize:
 		field = "attachment_size"
 	case SortByName:
-		field = "key"
+		field = "agg_key"
 	default:
 		return "", fmt.Errorf("unsupported sort field: %d", opts.SortField)
 	}
@@ -273,11 +281,11 @@ func sortClause(opts AggregateOptions) (string, error) {
 		dir = "ASC"
 	}
 
-	// Secondary sort by key ensures deterministic ordering for ties
-	if field == "key" {
+	// Secondary sort by agg_key ensures deterministic ordering for ties
+	if field == "agg_key" {
 		return fmt.Sprintf("ORDER BY %s %s", field, dir), nil
 	}
-	return fmt.Sprintf("ORDER BY %s %s, key ASC", field, dir), nil
+	return fmt.Sprintf("ORDER BY %s %s, agg_key ASC", field, dir), nil
 }
 
 // buildFilterJoinsAndConditions builds JOIN and WHERE clauses from a MessageFilter.
@@ -556,7 +564,7 @@ func (e *SQLiteEngine) buildAggregateSearchParts(
 		var labelParts []string
 		for _, label := range q.Labels {
 			labelParts = append(labelParts,
-				`LOWER(l.name) LIKE LOWER(?) ESCAPE '\'`)
+				"LOWER(l.name) LIKE LOWER(?) "+e.dialect.LikeEscape())
 			args = append(args,
 				"%"+escapeSQLiteLike(label)+"%")
 		}
@@ -1354,12 +1362,12 @@ func (e *SQLiteEngine) buildSearchQueryParts(ctx context.Context, q *search.Quer
 	// Label filter - case-insensitive substring match using EXISTS
 	// so each label term can match a different row in message_labels.
 	for _, label := range q.Labels {
-		conditions = append(conditions, `EXISTS (
+		conditions = append(conditions, fmt.Sprintf(`EXISTS (
 			SELECT 1 FROM message_labels ml_lbl
 			JOIN labels l_lbl ON l_lbl.id = ml_lbl.label_id
 			WHERE ml_lbl.message_id = m.id
-			  AND LOWER(l_lbl.name) LIKE LOWER(?) ESCAPE '\'
-		)`)
+			  AND LOWER(l_lbl.name) LIKE LOWER(?) %s
+		)`, e.dialect.LikeEscape()))
 		args = append(args, "%"+escapeSQLiteLike(label)+"%")
 	}
 
@@ -1369,7 +1377,7 @@ func (e *SQLiteEngine) buildSearchQueryParts(ctx context.Context, q *search.Quer
 	// the LOWER wrapper still works there.
 	if len(q.SubjectTerms) > 0 {
 		for _, term := range q.SubjectTerms {
-			conditions = append(conditions, "LOWER(m.subject) LIKE LOWER(?) ESCAPE '\\'")
+			conditions = append(conditions, "LOWER(m.subject) LIKE LOWER(?) "+e.dialect.LikeEscape())
 			args = append(args, "%"+escapeSQLiteLike(term)+"%")
 		}
 	}
@@ -1414,8 +1422,9 @@ func (e *SQLiteEngine) buildSearchQueryParts(ctx context.Context, q *search.Quer
 			// returns the same hits as SQLite's ASCII-folded LIKE.
 			for _, term := range q.TextTerms {
 				likeTerm := "%" + escapeSQLiteLike(term) + "%"
+				esc := e.dialect.LikeEscape()
 				conditions = append(conditions,
-					"(LOWER(m.subject) LIKE LOWER(?) ESCAPE '\\' OR LOWER(m.snippet) LIKE LOWER(?) ESCAPE '\\')")
+					fmt.Sprintf("(LOWER(m.subject) LIKE LOWER(?) %s OR LOWER(m.snippet) LIKE LOWER(?) %s)", esc, esc))
 				args = append(args, likeTerm, likeTerm)
 			}
 		}

@@ -14,6 +14,7 @@ import (
 	_ "github.com/marcboeker/go-duckdb" // DuckDB driver (database/sql)
 	"github.com/spf13/cobra"
 	"go.kenn.io/msgvault/internal/query"
+	"go.kenn.io/msgvault/internal/store"
 )
 
 var queryFormat string
@@ -48,23 +49,31 @@ Examples:
 		dbPath := cfg.DatabaseDSN()
 		analyticsDir := cfg.AnalyticsDir()
 
-		staleness := cacheNeedsBuild(dbPath, analyticsDir)
-		if staleness.NeedsBuild {
-			fmt.Fprintf(os.Stderr,
-				"Building analytics cache (%s)...\n",
-				staleness.Reason)
-			result, err := buildCache(
-				dbPath, analyticsDir, staleness.FullRebuild,
-			)
-			if err != nil {
-				return fmt.Errorf("build cache: %w", err)
-			}
-			if !result.Skipped {
+		s, err := store.Open(dbPath)
+		if err != nil {
+			return fmt.Errorf("open database: %w", err)
+		}
+		if cache, ok := s.AnalyticsCache(); ok {
+			staleness := cacheNeedsBuild(s, analyticsDir)
+			if staleness.NeedsBuild {
 				fmt.Fprintf(os.Stderr,
-					"Cached %d messages.\n",
-					result.ExportedCount)
+					"Building analytics cache (%s)...\n",
+					staleness.Reason)
+				result, err := buildCache(
+					cache.SourcePath(), analyticsDir, staleness.FullRebuild,
+				)
+				if err != nil {
+					_ = s.Close()
+					return fmt.Errorf("build cache: %w", err)
+				}
+				if !result.Skipped {
+					fmt.Fprintf(os.Stderr,
+						"Cached %d messages.\n",
+						result.ExportedCount)
+				}
 			}
 		}
+		_ = s.Close()
 
 		if !query.HasCompleteParquetData(analyticsDir) {
 			return errors.New("analytics cache is empty — sync some " +

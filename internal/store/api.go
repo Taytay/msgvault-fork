@@ -364,11 +364,25 @@ func (s *Store) searchMessagesQueryImpl(
 		// Match each term against subject OR snippet so the no-FTS
 		// path catches snippet hits, not just subjects. Per CLAUDE.md,
 		// search queries never scan message_bodies.
+		//
+		// Mirror the FTS branch's tokenless handling: a term that reduces to
+		// nothing (empty/whitespace) must NOT become a match-all "%%" LIKE,
+		// and if no usable term remains the query substitutes FALSE so a
+		// tokenless search returns zero rows rather than every message.
+		matched := 0
 		for _, term := range q.TextTerms {
-			like := "%" + escapeLike(strings.ToLower(term)) + "%"
+			t := strings.TrimSpace(term)
+			if t == "" {
+				continue
+			}
+			like := "%" + escapeLike(strings.ToLower(t)) + "%"
 			conditions = append(conditions,
 				`(LOWER(m.subject) LIKE ? ESCAPE '\' OR LOWER(m.snippet) LIKE ? ESCAPE '\')`)
 			args = append(args, like, like)
+			matched++
+		}
+		if matched == 0 {
+			conditions = append(conditions, "FALSE")
 		}
 	}
 

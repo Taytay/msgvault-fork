@@ -67,7 +67,7 @@ func TestQueryEngine_PostgresPortability(t *testing.T) {
 			"ReplaceMessageLabels")
 	}
 
-	eng := query.NewEngine(st.DB(), st.IsPostgreSQL())
+	eng := query.NewEngineForStore(st)
 	ctx := context.Background()
 
 	// (1) Aggregate — must not error with "syntax error near ')'" on PG.
@@ -160,7 +160,7 @@ func TestQueryEngine_CaseInsensitiveSearch_Subject(t *testing.T) {
 	require.NoError(err, "UpsertMessage")
 	_ = mid
 
-	eng := query.NewEngine(st.DB(), st.IsPostgreSQL())
+	eng := query.NewEngineForStore(st)
 	ctx := context.Background()
 
 	for _, term := range []string{"invoice", "INVOICE", "Invoice"} {

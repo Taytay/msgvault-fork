@@ -175,7 +175,7 @@ Examples:
 
 		// Open vector backend (optional) so newly-ingested messages
 		// are enqueued for embedding.
-		vf, err := setupVectorFeatures(ctx, s.DB(), dbPath)
+		vf, err := setupVectorFeatures(ctx, s)
 		if err != nil {
 			return fmt.Errorf("vector features: %w", err)
 		}
@@ -210,7 +210,7 @@ Examples:
 		}
 
 		// Rebuild analytics cache.
-		rebuildCacheAfterWrite(dbPath)
+		refreshReadModelAfterWrite(dbPath)
 
 		if len(syncErrors) > 0 {
 			fmt.Println()

@@ -67,9 +67,8 @@ Add to Claude Desktop config:
 					"until 'msgvault tui' or 'msgvault search' is run\n")
 		}
 
-		engine := query.OpenReadEngine(s.DB(), dbPath, query.ReadEngineOptions{
+		engine := query.OpenReadEngine(s, query.ReadEngineOptions{
 			AnalyticsDir:         cfg.AnalyticsDir(),
-			IsPostgres:           s.IsPostgreSQL(),
 			ForceSQL:             mcpForceSQL,
 			DisableSQLiteScanner: mcpNoSQLiteScanner,
 		})
@@ -86,7 +85,7 @@ Add to Claude Desktop config:
 		// query-only server, so the worker and enqueuer fields go
 		// unused — only Backend, HybridEngine, and VectorCfg reach
 		// the MCP layer.
-		vf, err := setupVectorFeatures(ctx, s.DB(), dbPath)
+		vf, err := setupVectorFeatures(ctx, s)
 		if err != nil {
 			return fmt.Errorf("vector features: %w", err)
 		}

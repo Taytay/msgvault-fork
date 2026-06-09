@@ -1,8 +1,9 @@
 package query
 
 import (
-	"database/sql"
 	"log/slog"
+
+	"go.kenn.io/msgvault/internal/store"
 )
 
 // ReadEngineOptions configures OpenReadEngine.
@@ -10,15 +11,12 @@ type ReadEngineOptions struct {
 	// AnalyticsDir holds the Parquet analytics cache; consulted only for the
 	// DuckDB fast path.
 	AnalyticsDir string
-	// IsPostgres selects the PostgreSQL dialect engine and bypasses the
-	// SQLite-only Parquet/DuckDB pipeline entirely.
-	IsPostgres bool
 	// ForceSQL skips the Parquet/DuckDB fast path and uses the direct engine.
 	ForceSQL bool
 	// CacheStale marks the Parquet cache as out of date: when set, the direct
 	// engine is used even if the cache files are complete. Callers compute it
-	// (e.g. via the build-cache staleness check); it is irrelevant on
-	// PostgreSQL, which never uses the cache.
+	// (e.g. via the build-cache staleness check); it is irrelevant to backends
+	// without the analytics-cache capability, which never use the cache.
 	CacheStale bool
 	// DisableSQLiteScanner forces DuckDB to read via the CSV fallback instead
 	// of the sqlite_scanner extension (Windows / debugging).
@@ -31,28 +29,34 @@ type ReadEngineOptions struct {
 // consolidates the choice that the serve, mcp, and tui commands each used to
 // duplicate (and had begun to drift on):
 //
-//   - PostgreSQL → the dialect-parameterized SQLite engine (no Parquet cache).
+//   - backends without the analytics-cache capability (PostgreSQL, Dolt) → the
+//     dialect-parameterized direct engine (no Parquet cache).
 //   - otherwise, when a complete Parquet cache is present and neither stale nor
-//     force-disabled → DuckDB over Parquet, falling back to the direct SQLite
-//     engine (with a warning) if DuckDB cannot open.
-//   - otherwise → the direct SQLite engine.
+//     force-disabled → DuckDB over Parquet, falling back to the direct engine
+//     (with a warning) if DuckDB cannot open.
+//   - otherwise → the direct engine.
 //
-// It does NOT build the cache — callers that want a fresh cache build it first
-// (only the TUI does, today). The returned engine's Close() is always safe to
-// defer: the SQLite engine's Close is a no-op; only DuckDB owns a handle.
-func OpenReadEngine(db *sql.DB, dbPath string, opts ReadEngineOptions) Engine {
+// Backend selection is delegated entirely to the store's capabilities: the
+// presence of AnalyticsCache decides whether the Parquet path is even
+// considered, and NewEngineForStore picks the SQL dialect. It does NOT build
+// the cache — callers that want a fresh cache build it first (only the TUI
+// does, today). The returned engine's Close() is always safe to defer: the
+// direct engine's Close is a no-op; only DuckDB owns a handle.
+func OpenReadEngine(s *store.Store, opts ReadEngineOptions) Engine {
 	log := opts.Log
 	if log == nil {
 		log = slog.Default()
 	}
 
-	if opts.IsPostgres {
-		return NewEngine(db, true)
+	cache, ok := s.AnalyticsCache()
+	if !ok {
+		// No local analytics cache (PostgreSQL, Dolt): query the backend directly.
+		return NewEngineForStore(s)
 	}
 
 	useCache := !opts.ForceSQL && !opts.CacheStale && HasCompleteParquetData(opts.AnalyticsDir)
 	if useCache {
-		duck, err := NewDuckDBEngine(opts.AnalyticsDir, dbPath, db,
+		duck, err := NewDuckDBEngine(opts.AnalyticsDir, cache.SourcePath(), s.DB(),
 			DuckDBOptions{DisableSQLiteScanner: opts.DisableSQLiteScanner})
 		if err == nil {
 			return duck
@@ -62,5 +66,5 @@ func OpenReadEngine(db *sql.DB, dbPath string, opts ReadEngineOptions) Engine {
 		log.Info("Parquet cache not usable; using direct SQLite engine (run 'msgvault build-cache' for faster aggregates)")
 	}
 
-	return NewEngine(db, false)
+	return NewEngineForStore(s)
 }

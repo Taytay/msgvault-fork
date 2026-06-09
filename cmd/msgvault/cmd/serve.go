@@ -104,7 +104,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	// Build optional vector-search components. Returns (nil, nil) when
 	// cfg.Vector.Enabled is false, or an error when enabled but the
 	// binary was built without -tags sqlite_vec.
-	vf, err := setupVectorFeatures(ctx, s.DB(), dbPath)
+	vf, err := setupVectorFeatures(ctx, s)
 	if err != nil {
 		return fmt.Errorf("vector features: %w", err)
 	}
@@ -122,13 +122,14 @@ func runServe(cmd *cobra.Command, args []string) error {
 	analyticsDir := cfg.AnalyticsDir()
 	readOpts := query.ReadEngineOptions{
 		AnalyticsDir: analyticsDir,
-		IsPostgres:   s.IsPostgreSQL(),
 		Log:          logger,
 	}
-	if !readOpts.IsPostgres {
-		readOpts.CacheStale = cacheNeedsBuild(dbPath, analyticsDir).NeedsBuild
+	// Treat a stale cache as unusable so aggregates never read behind the DB.
+	// Only backends with the analytics-cache capability have a cache to stale.
+	if _, ok := s.AnalyticsCache(); ok {
+		readOpts.CacheStale = cacheNeedsBuild(s, analyticsDir).NeedsBuild
 	}
-	engine := query.OpenReadEngine(s.DB(), dbPath, readOpts)
+	engine := query.OpenReadEngine(s, readOpts)
 	defer func() { _ = engine.Close() }()
 
 	getOAuthMgr := oauthManagerCache()
@@ -390,27 +391,11 @@ func runScheduledSync(ctx context.Context, identifier string, s *store.Store, ge
 		"duration", time.Since(startTime),
 	)
 
-	// Rebuild cache if stale (covers new messages and deletions). The
-	// Parquet cache is SQLite-only; skip on PostgreSQL DSNs.
-	dbPath := cfg.DatabaseDSN()
-	if store.IsPostgresURL(dbPath) {
-		return nil
-	}
-	analyticsDir := cfg.AnalyticsDir()
-	if staleness := cacheNeedsBuild(dbPath, analyticsDir); staleness.NeedsBuild {
-		logger.Info("rebuilding cache after sync",
-			"identifier", identifier, "reason", staleness.Reason,
-			"full_rebuild", staleness.FullRebuild)
-		result, err := buildCache(
-			dbPath, analyticsDir, staleness.FullRebuild)
-		if err != nil {
-			logger.Error("cache build failed", "error", err)
-			// Don't fail the sync for cache build errors
-		} else if !result.Skipped {
-			logger.Info("cache build completed",
-				"exported", result.ExportedCount,
-			)
-		}
+	// Refresh whatever derived read model this backend needs (SQLite Parquet
+	// cache, Dolt replica projection, or nothing for direct-query backends).
+	// Don't fail the sync on refresh errors — the data is durable either way.
+	if err := refreshReadModel(ctx, s); err != nil {
+		logger.Error("read-model refresh after sync failed", "identifier", identifier, "error", err)
 	}
 
 	return nil

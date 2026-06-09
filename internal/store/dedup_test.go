@@ -197,7 +197,7 @@ func TestStore_BackfillRFC822IDs_ParsesFromRawMIME(t *testing.T) {
 
 func TestStore_BackfillRFC822IDs_DoesNotOvercountRolledBackBatch(t *testing.T) {
 	require := requirepkg.New(t)
-	testutil.SkipIfPostgres(t, "uses SQLite-specific CREATE TRIGGER ... NEW.* / RAISE(FAIL,...) syntax to force a mid-batch rollback")
+	testutil.SkipIfServerBackend(t, "uses SQLite-specific CREATE TRIGGER ... BEFORE UPDATE OF / RAISE(FAIL,...) syntax to force a mid-batch rollback; not valid on PostgreSQL or MySQL/Dolt")
 	f := storetest.New(t)
 
 	idA := newRFC822Message(t, f, "needs-backfill-a", "")

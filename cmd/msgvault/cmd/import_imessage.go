@@ -149,8 +149,8 @@ func finishImessageImport(s *store.Store) {
 	dbPath := cfg.DatabaseDSN()
 	if mutated {
 		// Title/display_name updates aren't visible to the message-id-keyed
-		// staleness check, so the standard rebuildCacheAfterWrite would skip.
-		// Force a full rebuild so conversations.parquet and
+		// staleness check, so the standard refreshReadModelAfterWrite would
+		// skip. Force a full rebuild so conversations.parquet and
 		// participants.parquet are re-exported and the TUI sees the new names.
 		if _, err := buildCache(dbPath, cfg.AnalyticsDir(), true); err != nil {
 			fmt.Fprintf(os.Stderr,
@@ -161,7 +161,7 @@ func finishImessageImport(s *store.Store) {
 		return
 	}
 
-	rebuildCacheAfterWrite(dbPath)
+	refreshReadModelAfterWrite(dbPath)
 }
 
 func retitleImessageChats(s *store.Store) bool {

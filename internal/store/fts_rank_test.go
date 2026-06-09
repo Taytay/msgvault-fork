@@ -22,6 +22,9 @@ func nullString(s string) sql.NullString {
 func TestFTSRankWeightsAcrossBackends(t *testing.T) {
 	require := requirepkg.New(t)
 	st := testutil.NewTestStore(t)
+	if !st.FTS5Available() {
+		t.Skip("store-level FTS ranking requires the FTSIndexer capability (SQLite/PostgreSQL); Dolt keyword search is served by doltvec, not the store")
+	}
 
 	src, err := st.GetOrCreateSource("gmail", "rank@example.com")
 	require.NoError(err, "GetOrCreateSource")

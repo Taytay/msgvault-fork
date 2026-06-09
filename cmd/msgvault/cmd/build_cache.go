@@ -67,29 +67,29 @@ Use --full-rebuild to recreate all cache files from scratch.`,
 		dbPath := cfg.DatabaseDSN()
 		analyticsDir := cfg.AnalyticsDir()
 
-		// The Parquet cache is a SQLite → DuckDB ETL; feeding a
-		// postgres:// DSN to the SQLite driver inside buildCache
-		// fails immediately with a confusing driver error.
-		if store.IsPostgresURL(dbPath) {
-			return errors.New("build-cache is SQLite-only; PostgreSQL backends do not use the Parquet analytics cache")
+		// OpenExisting won't auto-create a missing file-backed database; the
+		// store decides what "file-backed" means, so this command doesn't.
+		s, err := store.OpenExisting(dbPath)
+		if errors.Is(err, store.ErrDatabaseNotFound) {
+			return fmt.Errorf("database not found: %s\nRun 'msgvault init-db' first", dbPath)
 		}
-		if store.IsMySQLURL(dbPath) {
-			return errors.New("build-cache cannot read the Dolt backend directly; run 'msgvault project' to rebuild the local SQLite replica and its Parquet cache from Dolt")
+		if err != nil {
+			return fmt.Errorf("open database: %w", err)
 		}
 
-		// Check database exists
-		if _, err := os.Stat(dbPath); os.IsNotExist(err) {
-			return fmt.Errorf("database not found: %s\nRun 'msgvault init-db' first", dbPath)
+		// build-cache is a SQLite → DuckDB ETL; it needs a local analytics
+		// source. The store reports whether it has one (and how to get one,
+		// for the Dolt backend) — the command does not branch on backend type.
+		cache, err := s.RequireAnalyticsCache()
+		if err != nil {
+			_ = s.Close()
+			return err
 		}
 
 		// Ensure schema is up to date before building cache.
 		// Legacy databases may be missing columns (e.g. attachment_count,
 		// sender_id, message_type, phone_number) that the export queries
 		// reference. Running migrations first adds them.
-		s, err := store.Open(dbPath)
-		if err != nil {
-			return fmt.Errorf("open database: %w", err)
-		}
 		if err := s.InitSchema(); err != nil {
 			_ = s.Close()
 			return fmt.Errorf("init schema: %w", err)
@@ -100,7 +100,7 @@ Use --full-rebuild to recreate all cache files from scratch.`,
 		}
 		_ = s.Close()
 
-		result, err := buildCache(dbPath, analyticsDir, fullRebuild)
+		result, err := buildCache(cache.SourcePath(), analyticsDir, fullRebuild)
 		if err != nil {
 			return err
 		}
@@ -805,30 +805,6 @@ func exportToCSV(db *sql.DB, query string, dest string) error {
 		return err
 	}
 	return rows.Err()
-}
-
-// rebuildCacheAfterWrite rebuilds the analytics cache after a write
-// operation. Uses the staleness check to determine whether a full
-// rebuild (deletions/mutations) or incremental export (new messages
-// only) is needed. Logs a warning on failure — the data is safe in
-// SQLite.
-func rebuildCacheAfterWrite(dbPath string) {
-	analyticsDir := cfg.AnalyticsDir()
-	fullRebuild := false
-	if staleness := cacheNeedsBuild(dbPath, analyticsDir); staleness.FullRebuild {
-		fullRebuild = true
-	}
-	result, err := buildCache(dbPath, analyticsDir, fullRebuild)
-	if err != nil {
-		fmt.Fprintf(os.Stderr,
-			"Warning: cache rebuild failed: %v\n", err)
-		fmt.Fprintf(os.Stderr,
-			"Run 'msgvault build-cache' to retry.\n")
-		return
-	}
-	if !result.Skipped {
-		logger.Info("cache rebuilt", "exported", result.ExportedCount)
-	}
 }
 
 func init() {
