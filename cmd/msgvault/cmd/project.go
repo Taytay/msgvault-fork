@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 
@@ -42,14 +43,14 @@ machine). Rebuild embeddings separately with 'msgvault embeddings build'.`,
 		}
 		defer func() { _ = src.Close() }()
 
-		// project rebuilds the local replica FROM Dolt; it is meaningful only
-		// when Dolt is the system of record. SQLite/PostgreSQL backends are
-		// queried directly and use 'build-cache' instead.
-		if src.Backend() != store.BackendDolt {
-			return fmt.Errorf(
-				"project is only for the Dolt backend; set [data].database_url "+
-					"to a mysql:// or dolt:// URL (the %s backend is queried "+
-					"directly and uses 'build-cache' instead)", src.Backend())
+		// project rebuilds the local replica FROM a versioned system of record.
+		// That property — not the concrete backend — is what makes the source
+		// projectable, so gate on the capability rather than the type.
+		if _, ok := src.VersionController(); !ok {
+			return errors.New(
+				"project requires a versioned system of record (set " +
+					"[data].database_url to a mysql:// or dolt:// URL); other " +
+					"backends are queried directly and use 'build-cache' instead")
 		}
 
 		// Fresh replica: remove any prior file so the rebuild is authoritative.

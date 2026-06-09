@@ -544,11 +544,9 @@ func randomBatchToken() string {
 // with a pointer to --no-backup so the user can make an informed
 // choice (run pg_dump out-of-band, or skip the safety net).
 func backupDatabase(st *store.Store, dst string) error {
-	backup, ok := st.SnapshotBackup()
-	if !ok {
-		return fmt.Errorf("backup-before-dedup is not supported on the %s backend "+
-			"(it uses SQLite VACUUM INTO); snapshot the database with the backend's "+
-			"native tooling out-of-band, then rerun with --no-backup", st.Backend())
+	backup, err := st.RequireSnapshotBackup()
+	if err != nil {
+		return fmt.Errorf("%w; or rerun with --no-backup to skip", err)
 	}
 	if _, err := os.Stat(dst); err == nil {
 		return fmt.Errorf("backup target already exists: %s", dst)

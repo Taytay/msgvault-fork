@@ -94,6 +94,20 @@ func (s *Store) RequireAnalyticsCache() (AnalyticsCache, error) {
 	}
 }
 
+// RequireSnapshotBackup returns the snapshot-backup capability, or an error
+// naming the backend that lacks it. Like RequireAnalyticsCache, the message is
+// authored here so callers need not branch on backend identity.
+func (s *Store) RequireSnapshotBackup() (SnapshotBackup, error) {
+	if b, ok := s.SnapshotBackup(); ok {
+		return b, nil
+	}
+	return nil, &UnsupportedError{
+		Feature: "file-snapshot backup",
+		Backend: s.Backend().String(),
+		Hint:    "snapshot the database with the backend's native tooling out-of-band",
+	}
+}
+
 // UnsupportedError reports that the active backend does not provide a
 // capability a command requires. Hint carries optional backend-authored
 // remediation advice.

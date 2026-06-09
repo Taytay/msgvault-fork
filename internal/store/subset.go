@@ -41,6 +41,28 @@ func CopySubset(
 		return nil, fmt.Errorf("create-subset requires a local SQLite source database (it uses ATTACH DATABASE); %q is a %s backend", srcDBPath, b)
 	}
 
+	// Validate the source up front — before creating the destination — so a
+	// missing or malformed source fails fast and ATTACH never creates an empty
+	// file for a bad path. Missing-source is reported via ErrDatabaseNotFound
+	// so callers can add a setup hint without inspecting the backend.
+	srcDBPath, err := filepath.Abs(filepath.Clean(srcDBPath))
+	if err != nil {
+		return nil, fmt.Errorf("canonicalize source path: %w", err)
+	}
+	for _, r := range srcDBPath {
+		if r < 0x20 || r == 0x7F {
+			return nil, fmt.Errorf(
+				"source database path contains control character (0x%02X)", r,
+			)
+		}
+	}
+	if _, err := os.Stat(srcDBPath); err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("source database not found: %s: %w", srcDBPath, ErrDatabaseNotFound)
+		}
+		return nil, fmt.Errorf("source database not found: %w", err)
+	}
+
 	start := time.Now()
 
 	dstDBPath := filepath.Join(dstDir, "msgvault.db")
@@ -85,26 +107,6 @@ func CopySubset(
 	if err := st.Close(); err != nil {
 		cleanup()
 		return nil, fmt.Errorf("close schema database: %w", err)
-	}
-
-	// Validate source path before opening destination DB, so
-	// ATTACH doesn't silently create an empty file for a bad path.
-	srcDBPath, err = filepath.Abs(filepath.Clean(srcDBPath))
-	if err != nil {
-		cleanup()
-		return nil, fmt.Errorf("canonicalize source path: %w", err)
-	}
-	for _, r := range srcDBPath {
-		if r < 0x20 || r == 0x7F {
-			cleanup()
-			return nil, fmt.Errorf(
-				"source database path contains control character (0x%02X)", r,
-			)
-		}
-	}
-	if _, err := os.Stat(srcDBPath); err != nil {
-		cleanup()
-		return nil, fmt.Errorf("source database not found: %w", err)
 	}
 
 	// Phase 2: re-open with foreign keys OFF for bulk copy

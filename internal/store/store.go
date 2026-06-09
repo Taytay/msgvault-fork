@@ -123,6 +123,28 @@ func Open(dbPath string) (*Store, error) {
 	}
 }
 
+// ErrDatabaseNotFound is returned by OpenExisting when a file-backed database
+// does not exist. Callers test for it with errors.Is to surface a setup hint
+// ("run init-db") without knowing which backends are file-backed.
+var ErrDatabaseNotFound = errors.New("database does not exist")
+
+// OpenExisting opens a database that must already exist. For file-backed
+// backends (SQLite) a missing file yields ErrDatabaseNotFound instead of
+// silently creating an empty database; client/server backends behave like
+// Open. Commands that must not auto-create (build-cache, etc.) use this so they
+// need not know which backends live in a file.
+func OpenExisting(dbPath string) (*Store, error) {
+	if BackendOfDSN(dbPath) == BackendSQLite && !strings.Contains(dbPath, ":memory:") {
+		if _, err := os.Stat(dbPath); err != nil {
+			if os.IsNotExist(err) {
+				return nil, fmt.Errorf("%s: %w", dbPath, ErrDatabaseNotFound)
+			}
+			return nil, fmt.Errorf("stat database %s: %w", dbPath, err)
+		}
+	}
+	return Open(dbPath)
+}
+
 // OpenForTest opens or creates a database tuned for test use: ephemeral,
 // fast, with durability disabled. PostgreSQL URLs go through the normal
 // connection path (durability is a server-side concern there).

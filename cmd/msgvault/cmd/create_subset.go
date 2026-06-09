@@ -54,19 +54,6 @@ func runCreateSubset(cmd *cobra.Command, _ []string) error {
 	}
 
 	srcDBPath := cfg.DatabaseDSN()
-	// CopySubset enforces the SQLite-only requirement itself (it uses ATTACH
-	// DATABASE). For a local file, surface the friendlier "run init-db first"
-	// hint before reaching it; server backends fall through to CopySubset's
-	// capability error.
-	if store.BackendOfDSN(srcDBPath) == store.BackendSQLite {
-		if _, err := os.Stat(srcDBPath); os.IsNotExist(err) {
-			return fmt.Errorf(
-				"source database not found: %s\n"+
-					"Run 'msgvault init-db' and sync first",
-				srcDBPath,
-			)
-		}
-	}
 
 	dstDir, err := filepath.Abs(subsetOutput)
 	if err != nil {
@@ -77,7 +64,12 @@ func runCreateSubset(cmd *cobra.Command, _ []string) error {
 		"Copying %d messages from %s...\n", subsetRows, srcDBPath,
 	)
 
+	// CopySubset validates the source itself (it must be a local SQLite file
+	// and must exist); the command stays unaware of backend specifics.
 	result, err := store.CopySubset(srcDBPath, dstDir, subsetRows)
+	if errors.Is(err, store.ErrDatabaseNotFound) {
+		return fmt.Errorf("source database not found: %s\nRun 'msgvault init-db' and sync first", srcDBPath)
+	}
 	if err != nil {
 		return fmt.Errorf("create subset: %w", err)
 	}

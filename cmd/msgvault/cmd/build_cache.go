@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -66,16 +67,12 @@ Use --full-rebuild to recreate all cache files from scratch.`,
 		dbPath := cfg.DatabaseDSN()
 		analyticsDir := cfg.AnalyticsDir()
 
-		// For a local file backend, fail with an actionable hint rather than
-		// having store.Open create an empty database. Server backends are
-		// classified after open via the analytics-cache capability below.
-		if store.BackendOfDSN(dbPath) == store.BackendSQLite {
-			if _, err := os.Stat(dbPath); os.IsNotExist(err) {
-				return fmt.Errorf("database not found: %s\nRun 'msgvault init-db' first", dbPath)
-			}
+		// OpenExisting won't auto-create a missing file-backed database; the
+		// store decides what "file-backed" means, so this command doesn't.
+		s, err := store.OpenExisting(dbPath)
+		if errors.Is(err, store.ErrDatabaseNotFound) {
+			return fmt.Errorf("database not found: %s\nRun 'msgvault init-db' first", dbPath)
 		}
-
-		s, err := store.Open(dbPath)
 		if err != nil {
 			return fmt.Errorf("open database: %w", err)
 		}
