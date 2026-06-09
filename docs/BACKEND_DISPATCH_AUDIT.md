@@ -161,9 +161,8 @@ direct path purely from `AnalyticsCache` presence; the `IsPostgres bool`
 option is gone. The seven `query.NewEngine(db, s.IsPostgreSQL())` call sites
 collapsed to `query.NewEngineForStore(s)`.
 
-`UnsupportedError` carries a backend-authored remediation hint (e.g. the Dolt
-"run 'msgvault project'" advice), so refusing commands surface guidance
-without branching on backend type.
+`UnsupportedError` carries a backend-authored remediation hint, so refusing
+commands surface guidance without branching on backend type.
 
 ### Adding a new backend
 

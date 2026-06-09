@@ -83,14 +83,10 @@ func (s *Store) RequireAnalyticsCache() (AnalyticsCache, error) {
 	if c, ok := s.AnalyticsCache(); ok {
 		return c, nil
 	}
-	var hint string
-	if s.Backend() == BackendDolt {
-		hint = "run 'msgvault project' to rebuild the local SQLite replica and its analytics cache from Dolt"
-	}
 	return nil, &UnsupportedError{
 		Feature: "the Parquet analytics cache",
 		Backend: s.Backend().String(),
-		Hint:    hint,
+		Hint:    "this backend is queried directly and needs no analytics cache",
 	}
 }
 

@@ -32,6 +32,9 @@ func (d *PostgreSQLDialect) Now() string { return "NOW()" }
 // type and rejects integer comparisons (`col = 1`) against boolean columns.
 func (d *PostgreSQLDialect) BoolTrueExpr(col string) string { return col }
 
+// RandomFunc returns PostgreSQL's random function (same spelling as SQLite).
+func (d *PostgreSQLDialect) RandomFunc() string { return "RANDOM()" }
+
 // JSONBindExpr returns "?::JSONB" — PG won't implicit-cast text to JSONB,
 // so a bare placeholder bound to a Go string raises a column-type
 // mismatch on the sources.sync_config write path.

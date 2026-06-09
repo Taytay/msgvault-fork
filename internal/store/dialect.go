@@ -131,6 +131,11 @@ type Dialect interface {
 	// integer comparisons against it, so the bare column name is correct.
 	BoolTrueExpr(col string) string
 
+	// RandomFunc returns the SQL function that yields a random value, used for
+	// ORDER BY random sampling. SQLite and PostgreSQL spell it RANDOM();
+	// MySQL/Dolt spells it RAND().
+	RandomFunc() string
+
 	// JSONBindExpr returns the SQL fragment to use in place of a bare ?
 	// when binding a Go string (or []byte) to a JSON column. SQLite has
 	// no JSON type and stores JSON as plain TEXT, so the placeholder

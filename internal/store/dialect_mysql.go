@@ -88,6 +88,9 @@ func (d *MySQLDialect) Now() string { return "NOW()" }
 // BoolTrueExpr compares against 1 — MySQL stores BOOLEAN as TINYINT(1).
 func (d *MySQLDialect) BoolTrueExpr(col string) string { return col + " = 1" }
 
+// RandomFunc returns MySQL/Dolt's random function (RAND(), not RANDOM()).
+func (d *MySQLDialect) RandomFunc() string { return "RAND()" }
+
 // JSONBindExpr returns a bare placeholder. MySQL/Dolt accept a JSON string
 // literal bound to a JSON column directly.
 func (d *MySQLDialect) JSONBindExpr() string { return "?" }

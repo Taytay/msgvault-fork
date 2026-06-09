@@ -886,9 +886,9 @@ func (s *Store) GetRandomMessageIDs(sourceID int64, limit int) ([]int64, error) 
 		rows, err := s.db.Query(fmt.Sprintf(`
 			SELECT id FROM messages
 			WHERE source_id = ? AND %s
-			ORDER BY RANDOM()
+			ORDER BY %s
 			LIMIT ?
-		`, live), sourceID, limit)
+		`, live, s.dialect.RandomFunc()), sourceID, limit)
 		if err != nil {
 			return nil, err
 		}
